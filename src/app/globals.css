@@ -599,6 +599,74 @@ code {
   font-weight: 500;
 }
 
+.capture {
+  margin: 1rem 0 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem 0.85rem;
+}
+
+.capture legend {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0 0.35rem;
+}
+
+.capture-option {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  padding: 0.45rem 0;
+  cursor: pointer;
+}
+
+.capture-option + .capture-option {
+  border-top: 1px solid var(--line);
+}
+
+.capture-option input {
+  margin-top: 0.28rem;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.capture-option > span {
+  display: block;
+  min-width: 0;
+}
+
+.capture-option strong {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.capture-option .muted.small {
+  display: block;
+  margin-top: 0.15rem;
+  line-height: 1.4;
+}
+
+.capture-option input:disabled + span strong {
+  color: var(--muted);
+}
+
+.source-badge {
+  margin-left: 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  text-transform: none;
+  color: var(--muted);
+  font-weight: 500;
+  vertical-align: 1px;
+}
+
 .fallback-note {
   margin: 0 0 1.25rem;
   padding: 0.6rem 0.85rem;

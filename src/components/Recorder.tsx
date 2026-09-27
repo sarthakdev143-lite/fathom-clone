@@ -3,6 +3,14 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { upload } from "@vercel/blob/client";
 import { useLiveSession } from "@/lib/use-live-session";
+import {
+  TabAudioError,
+  mixAudioSources,
+  requestTabAudioStream,
+  tabAudioSupported,
+  type CaptureMode,
+  type MixedCapture,
+} from "@/lib/audio-mix";
 import type { MeetingSummary } from "@/lib/summary";
 
 /**
@@ -36,6 +44,7 @@ const TRANSCRIPTION_SIZE_LIMIT_BYTES = 25 * 1024 * 1024;
 
 type Phase =
   | "idle"
+  | "requesting"
   | "recording"
   | "ready"
   | "uploading"
@@ -75,6 +84,8 @@ function detectRecordingSupport(): boolean {
  */
 const subscribeToNothing = () => () => {};
 const serverSnapshot = () => null;
+
+const detectTabAudioSupport = () => tabAudioSupported();
 
 function extensionFor(mimeType: string): string {
   const base = mimeType.split(";")[0].trim();
@@ -166,6 +177,9 @@ export default function Recorder() {
   const [summary, setSummary] = useState<MeetingSummary | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(true);
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("tab");
+  const [capturedSources, setCapturedSources] = useState<"tab+mic" | "mic" | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const live = useLiveSession();
   const [title, setTitle] = useState("");
   const [elapsed, setElapsed] = useState(0);
@@ -175,6 +189,12 @@ export default function Recorder() {
   const supported = useSyncExternalStore(
     subscribeToNothing,
     detectRecordingSupport,
+    serverSnapshot,
+  );
+
+  const tabSupported = useSyncExternalStore(
+    subscribeToNothing,
+    detectTabAudioSupport,
     serverSnapshot,
   );
 
@@ -199,11 +219,16 @@ export default function Recorder() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rafRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const mixRef = useRef<MixedCapture | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const releaseStream = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    // The mix owns the tab track and its own AudioContext, and its dispose also
+    // closes that context, so it is torn down before the standalone reference.
+    mixRef.current?.dispose();
+    mixRef.current = null;
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
@@ -216,7 +241,7 @@ export default function Recorder() {
 
   useEffect(() => releaseStream, [releaseStream]);
 
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (mode: CaptureMode) => {
     setError(null);
     setCaptured(null);
     setMeetingId(null);
@@ -228,9 +253,9 @@ export default function Recorder() {
       return;
     }
 
-    let stream: MediaStream;
+    let micStream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
@@ -251,14 +276,72 @@ export default function Recorder() {
       return;
     }
 
-    streamRef.current = stream;
+    /*
+     * Tab capture needs a user gesture, so the picker is opened from the click
+     * that started this. If it is cancelled or no audio is shared, the
+     * microphone that was already granted is released and nothing is recorded -
+     * silently falling back to mic-only would leave the user believing they had
+     * captured both sides of the call.
+     */
+    let tabStream: MediaStream | null = null;
+    if (mode === "tab") {
+      setPhase("requesting");
+      try {
+        tabStream = await requestTabAudioStream();
+      } catch (err) {
+        for (const track of micStream.getTracks()) track.stop();
+        setError(
+          err instanceof TabAudioError
+            ? err.message
+            : `Could not capture tab audio: ${
+                err instanceof Error ? err.message : "unknown error"
+              }`,
+        );
+        return;
+      }
+      setCapturedSources("tab+mic");
+    } else {
+      setCapturedSources("mic");
+    }
+
+    /*
+     * In mic mode the raw stream is recorded directly, so solo recording keeps
+     * working even if an AudioContext fails to start. In tab mode the two
+     * sources must be summed first, and the mixed stream becomes both what is
+     * recorded and what the live caption tap listens to, so the captions cover
+     * the remote side too.
+     */
+    let recordingStream: MediaStream;
+    let liveSourceStream: MediaStream;
+
+    if (tabStream) {
+      const mix = mixAudioSources({ micStream, tabStream });
+      mixRef.current = mix;
+      recordingStream = mix.stream;
+      liveSourceStream = mix.stream;
+      mix.onTabTrackEnded(() => {
+        // The user stopped sharing. Recording continues on the microphone, but
+        // staying silent about it would mean a transcript that looks complete
+        // while missing every remote speaker.
+        setNotice(
+          "Tab sharing stopped, so only your microphone is being recorded from " +
+            "here on. Stop and restart if you need the other side back.",
+        );
+        setCapturedSources("mic");
+      });
+    } else {
+      recordingStream = micStream;
+      liveSourceStream = micStream;
+    }
+
+    streamRef.current = recordingStream;
     const startedAt = performance.now();
 
     const mimeType = pickMimeType();
     let recorder: MediaRecorder;
     try {
       recorder = new MediaRecorder(
-        stream,
+        recordingStream,
         mimeType ? { mimeType } : undefined,
       );
     } catch (err) {
@@ -296,21 +379,30 @@ export default function Recorder() {
     recorder.start(1000);
     setPhase("recording");
 
-    // The AudioContext is created up front and shared with the live session, so
-    // the level meter and the PCM tap share one graph and one native stream.
-    let audioCtx: AudioContext | null = null;
-    try {
-      audioCtx = new AudioContext();
-      audioCtxRef.current = audioCtx;
-    } catch {
-      setMeterActive(false);
-    }
+    /*
+     * In tab mode the mix already owns an AudioContext, so it is reused rather
+     * than a second one being created - two contexts would resample the same
+     * stream twice. The meter and the live tap both read the mixed stream, so
+     * the captions cover the remote side of the call as well as the room.
+     */
+    const audioCtx: AudioContext | null = tabStream
+      ? mixRef.current?.audioContext ?? null
+      : (() => {
+          try {
+            const created = new AudioContext();
+            audioCtxRef.current = created;
+            return created;
+          } catch {
+            setMeterActive(false);
+            return null;
+          }
+        })();
 
     if (audioCtx) {
       try {
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 1024;
-        audioCtx.createMediaStreamSource(stream).connect(analyser);
+        audioCtx.createMediaStreamSource(liveSourceStream).connect(analyser);
         const data = new Uint8Array(analyser.frequencyBinCount);
         setMeterActive(true);
 
@@ -331,7 +423,7 @@ export default function Recorder() {
 
       if (liveEnabled) {
         await live.start({
-          stream,
+          stream: liveSourceStream,
           audioContext: audioCtx,
           title: title.trim() || "Live meeting",
         });
@@ -731,13 +823,33 @@ export default function Recorder() {
             </div>
           )}
         </div>
+      ) : phase === "requesting" ? (
+        <div className="panel panel-recording">
+          <p className="muted" style={{ margin: 0 }}>
+            Choose the tab playing your meeting, and tick{" "}
+            <strong>&ldquo;Also share tab audio&rdquo;</strong> when the browser
+            asks. Recording starts once you confirm.
+          </p>
+        </div>
       ) : phase === "recording" ? (
         <div className="panel panel-recording">
           <div className="rec-live">
             <span className="dot" aria-hidden="true" />
             Recording
+            {capturedSources && (
+              <span className="source-badge">
+                {capturedSources === "tab+mic"
+                  ? "tab audio + microphone"
+                  : "microphone only"}
+              </span>
+            )}
           </div>
           <p className="rec-timer">{formatDuration(elapsed)}</p>
+          {notice && (
+            <p className="warn" role="status">
+              {notice}
+            </p>
+          )}
           {meterActive && (
             <div className="meter" aria-hidden="true">
               <div
@@ -840,7 +952,7 @@ export default function Recorder() {
               type="button"
               className="btn btn-primary"
               disabled={supported === false}
-              onClick={startRecording}
+              onClick={() => startRecording(captureMode)}
             >
               Start recording
             </button>
@@ -852,6 +964,54 @@ export default function Recorder() {
               Upload a file
             </button>
           </div>
+
+          <fieldset className="capture">
+            <legend>What to record</legend>
+
+            <label className="capture-option">
+              <input
+                type="radio"
+                name="capture-mode"
+                value="tab"
+                checked={captureMode === "tab"}
+                disabled={!tabSupported}
+                onChange={() => setCaptureMode("tab")}
+              />
+              <span>
+                <strong>Record this tab&apos;s meeting audio</strong>
+                <span className="muted small">
+                  Captures the meeting playing in a browser tab and adds your
+                  microphone, so both sides end up in the recording. Needs Chrome
+                  or Edge, and you must tick &ldquo;Also share tab audio&rdquo;
+                  when the picker appears.
+                </span>
+              </span>
+            </label>
+
+            <label className="capture-option">
+              <input
+                type="radio"
+                name="capture-mode"
+                value="mic"
+                checked={captureMode === "mic"}
+                onChange={() => setCaptureMode("mic")}
+              />
+              <span>
+                <strong>Record microphone only</strong>
+                <span className="muted small">
+                  Just your own voice, for solo notes and dictation. A
+                  microphone cannot hear the other side of a call.
+                </span>
+              </span>
+            </label>
+
+            {!tabSupported && (
+              <p className="muted small" style={{ margin: "0.5rem 0 0" }}>
+                This browser cannot share tab audio, so the microphone option is
+                the only one available.
+              </p>
+            )}
+          </fieldset>
 
           <label className="field">
             <span>Title</span>
