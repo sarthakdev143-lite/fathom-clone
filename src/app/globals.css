@@ -478,3 +478,22 @@ code {
 .stub[open] summary {
   margin-bottom: 0.6rem;
 }
+
+.setup-notice {
+  border: 1px solid var(--line);
+  border-left: 3px solid #d97706;
+  border-radius: 12px;
+  padding: 1.25rem 1.4rem;
+}
+
+.setup-notice h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.setup-notice ul {
+  margin: 1rem 0 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 1.25rem;
+}

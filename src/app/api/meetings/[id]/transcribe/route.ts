@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { hasGroqKey, isDbConfigured } from "@/lib/config";
 import {
   NotFoundError,
   getAudioBlob,
@@ -14,6 +15,20 @@ export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ id: string }> };
 
 export async function POST(_request: Request, context: Context) {
+  if (!isDbConfigured) {
+    return NextResponse.json(
+      { error: "Storage is not configured. TURSO_DATABASE_URL is not set." },
+      { status: 503 },
+    );
+  }
+
+  if (!hasGroqKey) {
+    return NextResponse.json(
+      { error: "GROQ_API_KEY is not set, so transcription is unavailable." },
+      { status: 503 },
+    );
+  }
+
   const { id } = await context.params;
 
   let filename: string;

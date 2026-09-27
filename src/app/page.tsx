@@ -1,4 +1,6 @@
 import Link from "next/link";
+import SetupNotice from "@/components/SetupNotice";
+import { isDbConfigured } from "@/lib/config";
 import { listMeetings } from "@/lib/meetings";
 import type { Meeting, MeetingStatus } from "@/lib/types";
 
@@ -44,6 +46,15 @@ function parseSummary(meeting: Meeting) {
 }
 
 export default async function Dashboard() {
+  if (!isDbConfigured) {
+    return (
+      <main>
+        <h1>Meetings</h1>
+        <SetupNotice />
+      </main>
+    );
+  }
+
   const meetings = await listMeetings();
   const readyCount = meetings.filter((m) => m.status === "ready").length;
   const openActions = meetings.reduce(

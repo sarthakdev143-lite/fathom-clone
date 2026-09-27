@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isDbConfigured } from "@/lib/config";
 import { createMeeting } from "@/lib/meetings";
 import type { MeetingSource } from "@/lib/types";
 
@@ -24,6 +25,13 @@ function titleFromFilename(filename: string): string {
 }
 
 export async function POST(request: Request) {
+  if (!isDbConfigured) {
+    return NextResponse.json(
+      { error: "Storage is not configured. TURSO_DATABASE_URL is not set." },
+      { status: 503 },
+    );
+  }
+
   let form: FormData;
   try {
     form = await request.formData();

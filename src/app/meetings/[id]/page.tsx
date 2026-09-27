@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import SetupNotice from "@/components/SetupNotice";
+import { isDbConfigured } from "@/lib/config";
 import { getMeeting, getSegments } from "@/lib/meetings";
 import type { MeetingSummary } from "@/lib/summary";
 import type { MeetingStatus } from "@/lib/types";
@@ -45,6 +47,19 @@ export default async function MeetingPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+
+  if (!isDbConfigured) {
+    return (
+      <main>
+        <p className="muted small">
+          <Link href="/">&larr; All meetings</Link>
+        </p>
+        <h1>Meeting</h1>
+        <SetupNotice />
+      </main>
+    );
+  }
+
   const meeting = await getMeeting(id);
 
   if (!meeting) notFound();
