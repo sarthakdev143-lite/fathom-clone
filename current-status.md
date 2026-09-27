@@ -23,6 +23,7 @@ tree is clean and green.
 | 5 | Seed | 4 meetings summarised through the real pipeline. 23/23 key moments land exactly on real segment starts. |
 | 6 | Live mode | Additive. Verified in production with real speech: captions at 6s intervals, provisional summary every ~35s of new audio, then the unchanged authoritative pipeline. |
 | 7 | Gemini fallback | Verified in production by deleting `GROQ_API_KEY` from Vercel and re-running: transcription and summary both completed via Gemini. |
+| 8 | Transcription accuracy | Measured at 99.1% WER 0.9% on a 128s two-speaker, 15-turn recording with injected noise. `whisper-large-v3-turbo` and full `whisper-large-v3` scored identically; Gemini scored 99.7%. |
 
 The pipeline was also run end to end **against the production deployment**:
 2.24 MB upload → 201, transcribe 3.9s, summarize 3.2s, detail page 200.
@@ -172,6 +173,61 @@ real Live API would need a browser-to-Google WebSocket, which puts the API key i
 client-visible code and in the network tab of every user. That is a real decision
 with a real security cost, not something to slip in, so it is not implemented.
 
+## Capture sources
+
+A microphone records one side of a call. Remote participants arrive as WebRTC
+*output* and are played through the speakers, never routed back into the input
+device, so a mic-only recording of a call contains half the conversation. Two
+options are offered in the capture panel, and what was actually captured is
+recorded rather than assumed:
+
+- **Record this tab's meeting audio** (default) - captures the tab playing the
+  meeting *and* the microphone, so both sides are in the file.
+- **Record microphone only** - for solo notes. The raw mic stream is recorded
+  directly, with no AudioContext in the path, so a failure to start one cannot
+  regress solo recording.
+
+The two sources are summed through the Web Audio API - two
+`MediaStreamAudioSourceNode`s into a mix bus, feeding one
+`MediaStreamAudioDestinationNode` - and that single stream is what MediaRecorder
+records. The mixed stream is also what the live caption tap reads, so live
+captions now cover the remote side too. Downstream it is just an audio file, so
+the transcribe and summarize pipeline is untouched.
+
+The mix never reaches `AudioContext.destination`. Routing tab audio back to the
+speakers while that same tab is playing it is a feedback loop, so the bus feeds
+the recording destination and a muted gain that exists only to keep the graph
+processing.
+
+**Verified by running the real app**, with only the browser's share-tab picker
+shimmed so the shipping code path executed end to end. Two different speakers
+were used, one on each source, and the resulting transcript interleaves them:
+
+> "Thanks everyone for joining" (mic) … "Did the load test finish?" (tab) … "I
+> have been waiting on those numbers all week" (tab) … "the main item is the Q3
+> launch date" (mic) … "The P99 latency was the thing I was worried about" (tab)
+
+Mic-only was re-tested the same way and still records the raw stream, reports
+`microphone only`, and never calls `getDisplayMedia`.
+
+**Failure modes that are handled explicitly**, because each one silently
+produces a half-transcript if ignored:
+
+| Situation | Behaviour |
+| --- | --- |
+| Picker cancelled | Nothing recorded, microphone released, message shown. |
+| "Also share tab audio" left unticked | Refused with instructions, rather than recording mic only. |
+| Browser cannot share tab audio | Option disabled, mic-only offered. |
+| Sharing stopped mid-recording | Recording continues on the mic and a notice says so. |
+
+**Not covered, and cannot be from a web page.** Native meeting apps, and the
+OS-level mixers a desktop tool would use. A Zoom or Teams desktop app plays its
+audio through a native window, so there is no tab to capture; and system loopback
+(WASAPI on Windows, BlackHole on macOS, PulseAudio monitor on Linux) is not
+reachable from browser JavaScript at all. Someone on a native app still has to
+use the microphone option, a second device, or a desktop application. This is a
+platform boundary, not an oversight.
+
 ## Known limits, deliberately not addressed
 
 These are all outside the assigned steps 1–5 and were left alone on purpose.
@@ -280,6 +336,19 @@ Development-only variables, silently discarding any Production-only or local-onl
 entries. Back the file up before running it.
 
 ## Things that will surprise you
+
+**Transcription was never the weak link; capture was.** Accuracy measured at
+99.1% WER 0.9% on a noisy two-speaker recording, so a transcript that reads
+wrongly is usually a recording that never contained the audio. The first
+measurement taken during this work appeared to show 45% error and turned out to
+be a broken test harness, not a model problem - three independent models agreed
+on the same divergences, which is what gave it away. If a transcript looks
+wrong, check the source indicator first: `Tab audio + microphone` versus
+`Microphone only`.
+
+**Switching to the full `whisper-large-v3` model would not improve accuracy.**
+Measured identical to the turbo model at 99.1% on the same audio, so there is no
+reason to spend 6x the latency for it.
 
 **`llama-3.3-70b-versatile` no longer exists on Groq.** It was retired between
 this being written and being run. The model id is env-overridable for that

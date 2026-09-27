@@ -58,6 +58,13 @@ interface CapturedFile {
   file: File;
   source: "recording" | "upload";
   durationSeconds: number | null;
+  /**
+   * Which inputs a recording actually contained. Null for uploads, where the
+   * question does not apply. Recorded rather than assumed, so a file that
+   * claims to be a meeting recording is never described as microphone-only
+   * because that was the default when it started.
+   */
+  sources?: "tab+mic" | "mic" | null;
 }
 
 function pickMimeType(): string | null {
@@ -179,6 +186,9 @@ export default function Recorder() {
   const [liveEnabled, setLiveEnabled] = useState(true);
   const [captureMode, setCaptureMode] = useState<CaptureMode>("tab");
   const [capturedSources, setCapturedSources] = useState<"tab+mic" | "mic" | null>(null);
+  // Mirrors capturedSources for the stop handler, which runs after a state
+  // update and would otherwise read a stale value.
+  const capturedSourcesRef = useRef<"tab+mic" | "mic" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const live = useLiveSession();
   const [title, setTitle] = useState("");
@@ -222,8 +232,7 @@ export default function Recorder() {
   const mixRef = useRef<MixedCapture | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const releaseStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+  const releaseStream = useCallback(() => {    streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     // The mix owns the tab track and its own AudioContext, and its dispose also
     // closes that context, so it is torn down before the standalone reference.
@@ -299,9 +308,9 @@ export default function Recorder() {
         );
         return;
       }
-      setCapturedSources("tab+mic");
+      capturedSourcesRef.current = "tab+mic";      setCapturedSources("tab+mic");
     } else {
-      setCapturedSources("mic");
+      capturedSourcesRef.current = "mic";      setCapturedSources("mic");
     }
 
     /*
@@ -327,7 +336,7 @@ export default function Recorder() {
           "Tab sharing stopped, so only your microphone is being recorded from " +
             "here on. Stop and restart if you need the other side back.",
         );
-        setCapturedSources("mic");
+        capturedSourcesRef.current = "mic";        setCapturedSources("mic");
       });
     } else {
       recordingStream = micStream;
@@ -367,6 +376,9 @@ export default function Recorder() {
         file: new File([blob], name, { type }),
         source: "recording",
         durationSeconds: Math.round(seconds * 100) / 100,
+        // Read the state, not the mode that was requested: if tab sharing
+        // stopped part-way through, only the microphone was recorded after that.
+        sources: capturedSourcesRef.current,
       });
       setPhase("ready");
     };
@@ -789,7 +801,13 @@ export default function Recorder() {
             </div>
             <div>
               <dt>Source</dt>
-              <dd>{captured.source === "recording" ? "Microphone" : "Upload"}</dd>
+              <dd>
+                {captured.source === "recording"
+                  ? captured.sources === "tab+mic"
+                    ? "Tab audio + microphone"
+                    : "Microphone only"
+                  : "Upload"}
+              </dd>
             </div>
           </dl>
 
