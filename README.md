@@ -6,7 +6,7 @@ Record a meeting, get a transcript and a summary — live at
 Records audio from the browser microphone or an uploaded file, showing live
 captions and a running summary while recording. Transcribes with Groq Whisper,
 then summarises into a TL;DR, topics, decisions, action items and timestamped key
-moments, listed on a dashboard with a detail page each.
+moments, on a dashboard with a detail page per meeting.
 
 ## Quickstart
 
@@ -18,7 +18,7 @@ npm install
 
 Set `GROQ_API_KEY` (transcription and summarization), `BLOB_READ_WRITE_TOKEN`
 (audio storage), `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in `.env.local`.
-The Turso pair is optional in development, where a local SQLite file is used.
+The Turso pair is optional in development, which uses a local SQLite file.
 
 ```bash
 npm run dev
@@ -31,11 +31,11 @@ makes live Groq calls.
 
 - Bot-based Zoom / Meet / Teams joining
 - Search
-- Live streaming
+- Live streaming of finished meetings
 
 See [current-status.md](./current-status.md) for why.
 
 ## Deep dive
 
-[current-status.md](./current-status.md) covers verification, architecture
-rationale, the bugs found, and known limits.
+[current-status.md](./current-status.md) — verification, architecture, live mode,
+bugs found, known limits.
