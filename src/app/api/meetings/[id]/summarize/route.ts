@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { hasGeminiKey } from "@/lib/gemini";
 import { hasGroqKey, isDbConfigured } from "@/lib/config";
+import { GeminiError } from "@/lib/gemini";
 import { NotFoundError, requireMeeting, setStatus } from "@/lib/meetings";
 import { GroqError } from "@/lib/groq";
 import { summarizeMeeting } from "@/lib/summarize";
@@ -17,9 +19,16 @@ export async function POST(_request: Request, context: Context) {
     );
   }
 
-  if (!hasGroqKey) {
+  // Either provider can serve this. Guarding on Groq alone would block a
+  // Gemini-only deployment, which is exactly the configuration the fallback
+  // exists to make work.
+  if (!hasGroqKey && !hasGeminiKey) {
     return NextResponse.json(
-      { error: "GROQ_API_KEY is not set, so summarization is unavailable." },
+      {
+        error:
+          "No summarization provider is configured. Set GROQ_API_KEY, or " +
+          "GEMINI_API_KEY to use the fallback.",
+      },
       { status: 503 },
     );
   }
@@ -44,17 +53,25 @@ export async function POST(_request: Request, context: Context) {
   }
 
   try {
-    const { summary, sampled, segmentsUsed, segmentsTotal } =
-      await summarizeMeeting(id);
+    const {
+      summary,
+      sampled,
+      segmentsUsed,
+      segmentsTotal,
+      provider,
+      fallbackReason,
+    } = await summarizeMeeting(id);
 
     return NextResponse.json({
       meeting: await requireMeeting(id),
       summary,
       transcriptCoverage: { sampled, segmentsUsed, segmentsTotal },
+      provider,
+      fallbackReason,
     });
   } catch (err) {
     const detail =
-      err instanceof GroqError
+      err instanceof GroqError || err instanceof GeminiError
         ? `${err.message}: ${err.detail}`
         : err instanceof Error
           ? err.message
