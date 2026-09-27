@@ -52,6 +52,10 @@ const MIGRATIONS: string[][] = [
   // meeting row keeps a URL instead of the bytes. `audio_blob` is left in place
   // so existing rows stay readable via the transcribe route's legacy path.
   [`ALTER TABLE meetings ADD COLUMN audio_url TEXT`],
+  // 4 -> 5: records whether the summary was built from the whole transcript or
+  // from an evenly sampled subset. Nullable, so rows summarised before this
+  // existed read as unknown rather than falsely claiming full coverage.
+  [`ALTER TABLE meetings ADD COLUMN transcript_sampled INTEGER`],
 ];
 
 export const isRemoteDb = Boolean(process.env.TURSO_DATABASE_URL);

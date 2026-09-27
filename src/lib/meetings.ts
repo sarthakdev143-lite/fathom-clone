@@ -60,7 +60,7 @@ export async function createMeeting(input: {
 /** Everything except `audio_blob`, for a single-meeting read. */
 const PUBLIC_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_bytes,
        duration_seconds, status, status_error, transcript, transcript_language,
-       summary_json, audio_url, created_at, updated_at`;
+       summary_json, audio_url, transcript_sampled, created_at, updated_at`;
 
 /**
  * The dashboard only renders title, metadata, status and the summary, so listing
@@ -228,13 +228,20 @@ export async function getSegments(id: string): Promise<TranscriptSegment[]> {
 export async function saveSummary(
   id: string,
   summary: MeetingSummary,
+  coverage: { sampled: boolean; segmentsUsed: number; segmentsTotal: number },
 ): Promise<void> {
   const client = await db();
   await client.execute({
     sql: `UPDATE meetings
-          SET summary_json = ?, status = 'ready', status_error = NULL, updated_at = ?
+          SET summary_json = ?, transcript_sampled = ?, status = 'ready',
+              status_error = NULL, updated_at = ?
           WHERE id = ?`,
-    args: [JSON.stringify(summary), new Date().toISOString(), id],
+    args: [
+      JSON.stringify(summary),
+      coverage.sampled ? 1 : 0,
+      new Date().toISOString(),
+      id,
+    ],
   });
 }
 

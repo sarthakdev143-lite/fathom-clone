@@ -57,7 +57,7 @@ export async function summarizeMeeting(
   });
 
   const summary = parseSummary(completion.content);
-  await saveSummary(id, summary);
+  await saveSummary(id, summary, { sampled, segmentsUsed, segmentsTotal });
 
   return {
     summary,

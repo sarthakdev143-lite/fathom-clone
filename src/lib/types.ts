@@ -23,6 +23,12 @@ export interface Meeting {
   summary_json: string | null;
   /** Where the audio lives in blob storage. Null for pre-migration rows. */
   audio_url?: string | null;
+  /**
+   * 1 when the summary was built from an evenly sampled subset of a long
+   * transcript, 0 when the whole transcript was used, null for meetings
+   * summarised before this was recorded.
+   */
+  transcript_sampled?: number | null;
   created_at: string;
   updated_at: string;
 }

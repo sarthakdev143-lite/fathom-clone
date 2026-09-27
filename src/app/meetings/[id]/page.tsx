@@ -101,7 +101,17 @@ export default async function MeetingPage({
 
       {summary ? (
         <section className="card" style={{ marginBottom: "1.5rem" }}>
-          <h2 className="section-title">Summary</h2>
+          <h2 className="section-title">
+            Summary
+            {meeting.transcript_sampled === 1 && (
+              <span
+                className="badge-note"
+                title="This meeting's transcript was too long to send in one piece, so the summary was built from an evenly spaced sample of the whole conversation. Earlier and later moments are represented, but some sentences between them were not read, so a detail may be missing."
+              >
+                Based on a sampled transcript
+              </span>
+            )}
+          </h2>
           <p className="tldr">{summary.tldr}</p>
 
           {summary.topics.length > 0 && (

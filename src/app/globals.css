@@ -403,6 +403,21 @@ code {
   font-weight: 600;
 }
 
+/* Informational, not a warning: the summary is still valid, just narrower. */
+.badge-note {
+  margin-left: 0.6rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  font-weight: 500;
+  color: var(--muted);
+  vertical-align: 1px;
+  cursor: help;
+}
+
 .meeting-list {
   list-style: none;
   margin: 0;
