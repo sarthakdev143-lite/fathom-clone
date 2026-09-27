@@ -1,3 +1,24 @@
 node_modules/
 .DS_Store
 *.log
+
+# env
+.env
+.env.local
+.env*.local
+
+# next
+/.next/
+/out/
+next-env.d.ts
+*.tsbuildinfo
+
+# local sqlite (libSQL file mode dev database)
+/data/
+*.db
+*.db-journal
+
+# opencode
+/.opencode/node_modules/
+
+.vercel
