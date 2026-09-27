@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertTrustedBlobUrl } from "./blob-url";
 import { db } from "./db";
 import type { MeetingSummary } from "./summary";
 import type { Meeting, MeetingSource, MeetingStatus } from "./types";
@@ -23,6 +24,7 @@ export async function createMeeting(input: {
   audioMime?: string | null;
   audioBytes?: number | null;
   durationSeconds?: number | null;
+  audioUrl?: string | null;
   audioBlob?: Uint8Array | null;
 }): Promise<Meeting> {
   const client = await db();
@@ -33,9 +35,9 @@ export async function createMeeting(input: {
     sql: `INSERT INTO meetings (
             id, title, source, audio_filename, audio_mime, audio_bytes,
             duration_seconds, status, status_error, transcript,
-            transcript_language, summary_json, audio_blob,
+            transcript_language, summary_json, audio_blob, audio_url,
             transcript_segments_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, NULL, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, NULL, ?, ?)`,
     args: [
       id,
       input.title,
@@ -46,6 +48,7 @@ export async function createMeeting(input: {
       input.durationSeconds ?? null,
       "uploaded",
       input.audioBlob ?? null,
+      input.audioUrl ?? null,
       now,
       now,
     ],
@@ -57,7 +60,7 @@ export async function createMeeting(input: {
 /** Everything except `audio_blob`, for a single-meeting read. */
 const PUBLIC_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_bytes,
        duration_seconds, status, status_error, transcript, transcript_language,
-       summary_json, created_at, updated_at`;
+       summary_json, audio_url, created_at, updated_at`;
 
 /**
  * The dashboard only renders title, metadata, status and the summary, so listing
@@ -67,7 +70,6 @@ const PUBLIC_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_byt
 const CARD_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_bytes,
        duration_seconds, status, status_error, transcript_language, summary_json,
        created_at, updated_at`;
-
 export async function getMeeting(id: string): Promise<Meeting | null> {
   const client = await db();
   const result = await client.execute({
@@ -90,9 +92,57 @@ export class NotFoundError extends Error {
   }
 }
 
-/** Loads the retained audio bytes. Kept out of `Meeting` so it is never
- *  accidentally serialised into a response body. */
-export async function getAudioBlob(id: string): Promise<Uint8Array | null> {
+export interface AudioSource {
+  bytes: Uint8Array;
+  filename: string;
+  mimeType: string | null;
+  /** True when the bytes came from blob storage rather than the legacy column. */
+  fromBlob: boolean;
+}
+
+/**
+ * Resolves a meeting's audio to bytes.
+ *
+ * Current meetings point at blob storage and are fetched over https. Rows
+ * created before the blob migration still carry the bytes in `audio_blob` and
+ * are read from there, so no existing meeting becomes untranscribable.
+ */
+export async function loadAudio(meeting: Meeting): Promise<AudioSource | null> {
+  const filename = meeting.audio_filename || "audio.webm";
+
+  if (meeting.audio_url) {
+    const trusted = assertTrustedBlobUrl(meeting.audio_url);
+    const response = await fetch(trusted);
+
+    if (!response.ok) {
+      throw new Error(
+        `Could not read the stored audio (HTTP ${response.status}). ` +
+          "The blob may have been deleted, in which case the meeting must be re-uploaded.",
+      );
+    }
+
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    return {
+      bytes: buffer,
+      filename,
+      mimeType: meeting.audio_mime,
+      fromBlob: true,
+    };
+  }
+
+  const stored = await getLegacyAudioBlob(meeting.id);
+  if (!stored) return null;
+
+  return {
+    bytes: stored,
+    filename,
+    mimeType: meeting.audio_mime,
+    fromBlob: false,
+  };
+}
+
+/** Reads the pre-blob `audio_blob` column. */
+async function getLegacyAudioBlob(id: string): Promise<Uint8Array | null> {
   const client = await db();
   const result = await client.execute({
     sql: `SELECT audio_blob FROM meetings WHERE id = ?`,

@@ -15,6 +15,11 @@ export const isDbConfigured = Boolean(process.env.TURSO_DATABASE_URL) || !isVerc
 
 export const hasGroqKey = Boolean(process.env.GROQ_API_KEY);
 
+export const hasBlobToken = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+
+/** Audio upload needs blob storage; without it the record page cannot work. */
+export const isUploadConfigured = hasBlobToken;
+
 export interface SetupIssue {
   envVar: string;
   problem: string;
@@ -31,6 +36,15 @@ export function setupIssues(): SetupIssue[] {
       problem:
         "No database is reachable. On Vercel a local SQLite file cannot be used, so TURSO_DATABASE_URL must point at a hosted libSQL/Turso database.",
       fix: "Create a free database at turso.tech, then set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the Vercel project environment.",
+    });
+  }
+
+  if (!hasBlobToken) {
+    issues.push({
+      envVar: "BLOB_READ_WRITE_TOKEN",
+      problem:
+        "Audio upload is unavailable. The browser uploads recordings directly to Vercel Blob using a client token minted by the server, so a read-write token is required.",
+      fix: "Create a Blob store (`vercel blob store add <name>`) and set BLOB_READ_WRITE_TOKEN in the Vercel project environment.",
     });
   }
 

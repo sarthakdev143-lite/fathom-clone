@@ -2,10 +2,11 @@ import { NextResponse } from "next/server";
 import { hasGroqKey, isDbConfigured } from "@/lib/config";
 import {
   NotFoundError,
-  getAudioBlob,
+  loadAudio,
   requireMeeting,
   saveTranscript,
   setStatus,
+  type AudioSource,
 } from "@/lib/meetings";
 import { GroqError, looksLikeSpeech, transcribeAudio } from "@/lib/groq";
 
@@ -31,35 +32,36 @@ export async function POST(_request: Request, context: Context) {
 
   const { id } = await context.params;
 
-  let filename: string;
-  let mimeType: string | null;
-  let audio: Uint8Array;
+  let audio: AudioSource;
 
   try {
     const meeting = await requireMeeting(id);
-    const blob = await getAudioBlob(id);
+    const loaded = await loadAudio(meeting);
 
-    if (!blob) {
+    if (!loaded) {
       return NextResponse.json(
         { error: "This meeting has no stored audio to transcribe." },
         { status: 409 },
       );
     }
-
-    filename = meeting.audio_filename || "audio.webm";
-    mimeType = meeting.audio_mime;
-    audio = blob;
+    audio = loaded;
   } catch (err) {
     if (err instanceof NotFoundError) {
       return NextResponse.json({ error: err.message }, { status: 404 });
     }
-    throw err;
+    // loadAudio throws a plain Error for unreachable or untrusted audio.
+    const detail = err instanceof Error ? err.message : "Unknown error.";
+    return NextResponse.json({ error: detail }, { status: 409 });
   }
 
   await setStatus(id, "transcribing");
 
   try {
-    const result = await transcribeAudio({ audio, filename, mimeType });
+    const result = await transcribeAudio({
+      audio: audio.bytes,
+      filename: audio.filename,
+      mimeType: audio.mimeType,
+    });
 
     if (!looksLikeSpeech(result.text, result.duration)) {
       // Whisper hallucinated filler for non-speech audio. Recording this as a

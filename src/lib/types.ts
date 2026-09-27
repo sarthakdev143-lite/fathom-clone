@@ -21,6 +21,8 @@ export interface Meeting {
   transcript: string | null;
   transcript_language: string | null;
   summary_json: string | null;
+  /** Where the audio lives in blob storage. Null for pre-migration rows. */
+  audio_url?: string | null;
   created_at: string;
   updated_at: string;
 }

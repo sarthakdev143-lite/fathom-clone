@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { upload } from "@vercel/blob/client";
 import type { MeetingSummary } from "@/lib/summary";
 
 /**
@@ -22,7 +23,15 @@ const MIME_CANDIDATES = [
   "audio/mpeg",
 ];
 
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** Matches `MAX_AUDIO_BYTES` in /api/meetings/blob. */
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Groq's transcription endpoint rejects audio over 25 MB. Uploading still works
+ * above that — the blob store does not care — but the transcription step will
+ * fail, so the user is warned rather than stopped.
+ */
+const TRANSCRIPTION_SIZE_LIMIT_BYTES = 25 * 1024 * 1024;
 
 type Phase =
   | "idle"
@@ -102,6 +111,23 @@ async function probeDuration(file: File): Promise<number | null> {
   }
 }
 
+/**
+ * Above this size the blob client switches to a multipart upload, splitting the
+ * file into parts sent in parallel. Worth doing well before the old 4.5 MB
+ * function limit: a single 100 MB PUT is slow and fails wholesale, whereas
+ * multipart retries individual parts.
+ */
+const MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * `audio/webm;codecs=opus` and friends carry codec parameters. The blob
+ * allowlist is matched against the declared content type, and the pathname
+ * extension is inferred from it, so the parameters are stripped first.
+ */
+function baseMimeType(mimeType: string): string {
+  return mimeType.split(";")[0].trim().toLowerCase() || "application/octet-stream";
+}
+
 function formatDuration(totalSeconds: number): string {
   const s = Math.max(0, Math.floor(totalSeconds));
   const mm = String(Math.floor(s / 60)).padStart(2, "0");
@@ -137,6 +163,7 @@ export default function Recorder() {
     duration: number | null;
   } | null>(null);
   const [summary, setSummary] = useState<MeetingSummary | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [title, setTitle] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
@@ -327,9 +354,76 @@ export default function Recorder() {
     setMeetingId(null);
     setTranscript(null);
     setSummary(null);
+    setUploadProgress(null);
     setElapsed(0);
     setPhase("idle");
   }, [releaseStream]);
+
+  /**
+   * Two steps, in this order:
+   *   1. Push the audio straight to blob storage from the browser, using a
+   *      short-lived client token minted by /api/meetings/blob.
+   *   2. Tell the server the meeting exists, passing only the resulting URL.
+   *
+   * The audio never enters a serverless function, so the 4.5 MB request body
+   * limit that used to cap recordings at roughly four minutes no longer applies.
+   */
+  const submit = useCallback(async () => {
+    if (!captured) return;
+    setError(null);
+    setPhase("uploading");
+    setUploadProgress(0);
+
+    const { file } = captured;
+    const contentType = baseMimeType(file.type);
+
+    try {
+      const result = await upload(`audio/${file.name}`, file, {
+        access: "public",
+        handleUploadUrl: "/api/meetings/blob",
+        contentType,
+        multipart: file.size > MULTIPART_THRESHOLD_BYTES,
+        onUploadProgress: ({ percentage }) => {
+          setUploadProgress(Math.round(percentage));
+        },
+      });
+
+      setUploadProgress(null);
+
+      const response = await fetch("/api/meetings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          source: captured.source,
+          duration: captured.durationSeconds,
+          audio: {
+            url: result.url,
+            filename: file.name,
+            mime: contentType,
+            size: file.size,
+          },
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setError(payload?.error ?? `Upload failed (HTTP ${response.status}).`);
+        setPhase("ready");
+        return;
+      }
+      setMeetingId(payload?.meeting?.id ?? null);
+      setPhase("uploaded");
+    } catch (err) {
+      setUploadProgress(null);
+      setError(
+        err instanceof Error
+          ? `Upload failed: ${err.message}`
+          : "Upload failed for an unknown reason.",
+      );
+      setPhase("ready");
+    }
+  }, [captured, title]);
 
   const transcribe = useCallback(async () => {
     if (!meetingId) return;
@@ -378,37 +472,6 @@ export default function Recorder() {
       setPhase("transcribed");
     }
   }, [meetingId]);
-
-  const submit = useCallback(async () => {
-    if (!captured) return;
-    setError(null);
-    setPhase("uploading");
-
-    const body = new FormData();
-    body.append("audio", captured.file);
-    body.append("source", captured.source);
-    body.append(
-      "duration",
-      captured.durationSeconds === null ? "" : String(captured.durationSeconds),
-    );
-    body.append("title", title);
-
-    try {
-      const response = await fetch("/api/meetings", { method: "POST", body });
-      const payload = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        setError(payload?.error ?? `Upload failed (HTTP ${response.status}).`);
-        setPhase("ready");
-        return;
-      }
-      setMeetingId(payload?.meeting?.id ?? null);
-      setPhase("uploaded");
-    } catch {
-      setError("Could not reach the server. Check your connection and retry.");
-      setPhase("ready");
-    }
-  }, [captured, title]);
 
   return (
     <div className="recorder">
@@ -573,6 +636,13 @@ export default function Recorder() {
             </div>
           </dl>
 
+          {captured.file.size > TRANSCRIPTION_SIZE_LIMIT_BYTES && (
+            <p className="warn" role="status">
+              This is {formatBytes(captured.file.size)}, over Groq&apos;s 25 MB
+              transcription limit. It will upload, but transcription will fail.
+            </p>
+          )}
+
           <label className="field">
             <span>Title</span>
             <input
@@ -597,6 +667,15 @@ export default function Recorder() {
               Discard
             </button>
           </div>
+
+          {uploadProgress !== null && (
+            <div className="progress" aria-live="polite">
+              <div className="progress-track">
+                <div className="progress-fill" style={{ width: `${uploadProgress}%` }} />
+              </div>
+              <span className="muted small">{uploadProgress}%</span>
+            </div>
+          )}
         </div>
       ) : phase === "recording" ? (
         <div className="panel panel-recording">

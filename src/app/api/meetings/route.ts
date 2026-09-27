@@ -1,23 +1,41 @@
 import { NextResponse } from "next/server";
 import { isDbConfigured } from "@/lib/config";
+import { isTrustedBlobUrl } from "@/lib/blob-url";
 import { createMeeting } from "@/lib/meetings";
 import type { MeetingSource } from "@/lib/types";
 
 export const runtime = "nodejs";
-// Meeting writes must never be served from a cache.
 export const dynamic = "force-dynamic";
 
 /**
- * 25 MB of Opus audio is a little over an hour of speech, so this ceiling only
- * ever trips on a genuinely wrong file.
+ * Creates a meeting from audio that the browser has already uploaded to blob
+ * storage.
  *
- * Note for production: Vercel caps a serverless request body at 4.5 MB, which is
- * roughly 20 minutes of low-bitrate audio. Longer recordings need chunked upload,
- * which is out of scope for the capture step.
+ * The audio bytes never pass through here. The client obtains a client token
+ * from `/api/meetings/blob`, PUTs the file straight to Vercel Blob, and then
+ * posts only the resulting URL plus metadata as JSON. That is what keeps long
+ * recordings working on Vercel, where a function request body is capped at
+ * 4.5 MB.
  */
-const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
-const ALLOWED_MIME_PREFIXES = ["audio/", "video/", "application/octet-stream"];
+interface CreateMeetingBody {
+  title?: unknown;
+  source?: unknown;
+  duration?: unknown;
+  audio?: {
+    url?: unknown;
+    filename?: unknown;
+    mime?: unknown;
+    size?: unknown;
+  };
+}
+
+function asString(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.slice(0, maxLength);
+}
 
 function titleFromFilename(filename: string): string {
   const base = filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim();
@@ -32,74 +50,70 @@ export async function POST(request: Request) {
     );
   }
 
-  let form: FormData;
+  let body: CreateMeetingBody;
   try {
-    form = await request.formData();
+    body = (await request.json()) as CreateMeetingBody;
   } catch {
     return NextResponse.json(
-      { error: "Expected a multipart/form-data body." },
+      { error: "Expected a JSON body." },
       { status: 400 },
     );
   }
 
-  const audio = form.get("audio");
+  const audio = body.audio;
 
-  if (!(audio instanceof File)) {
+  if (!audio || typeof audio !== "object") {
     return NextResponse.json(
-      { error: "Missing an `audio` file field." },
+      { error: "Missing an `audio` object with a `url`." },
       { status: 400 },
     );
   }
 
-  if (audio.size === 0) {
-    return NextResponse.json(
-      { error: "The uploaded audio file is empty." },
-      { status: 400 },
-    );
-  }
-
-  if (audio.size > MAX_UPLOAD_BYTES) {
+  // The transcribe route fetches this URL from the server, so an unchecked
+  // value would be a server-side request forgery vector.
+  if (!isTrustedBlobUrl(audio.url)) {
     return NextResponse.json(
       {
-        error: `Audio is ${(audio.size / 1024 / 1024).toFixed(1)} MB, over the ${MAX_UPLOAD_BYTES / 1024 / 1024} MB limit.`,
+        error:
+          "audio.url must be an https URL on a Vercel Blob host. Upload the " +
+          "file through /api/meetings/blob first.",
       },
-      { status: 413 },
+      { status: 400 },
     );
   }
 
-  if (
-    audio.type &&
-    !ALLOWED_MIME_PREFIXES.some((prefix) => audio.type.startsWith(prefix))
-  ) {
+  const filename = asString(audio.filename, 200) ?? "audio.webm";
+  const mime = asString(audio.mime, 120);
+  const size = Number(audio.size);
+  const audioBytes = Number.isFinite(size) && size > 0 ? Math.round(size) : null;
+
+  if (audioBytes === null) {
     return NextResponse.json(
-      { error: `Unsupported audio type "${audio.type}".` },
-      { status: 415 },
+      { error: "audio.size must be a positive number of bytes." },
+      { status: 400 },
     );
   }
 
-  const rawSource = form.get("source");
+  const rawSource = body.source;
   const source: MeetingSource =
     rawSource === "recording" || rawSource === "upload" ? rawSource : "upload";
 
-  const submittedTitle = form.get("title");
-  const title =
-    typeof submittedTitle === "string" && submittedTitle.trim().length > 0
-      ? submittedTitle.trim().slice(0, 200)
-      : titleFromFilename(audio.name || "meeting");
+  const title = asString(body.title, 200) ?? titleFromFilename(filename);
 
-  const rawDuration = Number(form.get("duration"));
-  const durationSeconds = Number.isFinite(rawDuration) && rawDuration > 0
-    ? Math.round(rawDuration * 100) / 100
-    : null;
+  const rawDuration = Number(body.duration);
+  const durationSeconds =
+    Number.isFinite(rawDuration) && rawDuration > 0
+      ? Math.round(rawDuration * 100) / 100
+      : null;
 
   const meeting = await createMeeting({
     title,
     source,
-    audioFilename: audio.name || null,
-    audioMime: audio.type || null,
-    audioBytes: audio.size,
+    audioFilename: filename,
+    audioMime: mime,
+    audioBytes,
     durationSeconds,
-    audioBlob: new Uint8Array(await audio.arrayBuffer()),
+    audioUrl: audio.url,
   });
 
   return NextResponse.json({ meeting }, { status: 201 });

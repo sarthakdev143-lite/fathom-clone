@@ -48,6 +48,10 @@ const MIGRATIONS: string[][] = [
   [`ALTER TABLE meetings ADD COLUMN audio_blob BLOB`],
   // 2 -> 3: word/segment timings, so summaries can cite real timestamps.
   [`ALTER TABLE meetings ADD COLUMN transcript_segments_json TEXT`],
+  // 3 -> 4: audio is uploaded straight to blob storage by the browser, so the
+  // meeting row keeps a URL instead of the bytes. `audio_blob` is left in place
+  // so existing rows stay readable via the transcribe route's legacy path.
+  [`ALTER TABLE meetings ADD COLUMN audio_url TEXT`],
 ];
 
 export const isRemoteDb = Boolean(process.env.TURSO_DATABASE_URL);
