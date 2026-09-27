@@ -54,10 +54,19 @@ export async function createMeeting(input: {
   return requireMeeting(id);
 }
 
-/** Every column except `audio_blob`, so a Meeting is always safe to serialise. */
+/** Everything except `audio_blob`, for a single-meeting read. */
 const PUBLIC_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_bytes,
        duration_seconds, status, status_error, transcript, transcript_language,
-       summary_json, transcript_segments_json, created_at, updated_at`;
+       summary_json, created_at, updated_at`;
+
+/**
+ * The dashboard only renders title, metadata, status and the summary, so listing
+ * every full transcript would pull the entire corpus into memory for nothing.
+ * On a 100-meeting account that is the difference between a few KB and a few MB.
+ */
+const CARD_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_bytes,
+       duration_seconds, status, status_error, transcript_language, summary_json,
+       created_at, updated_at`;
 
 export async function getMeeting(id: string): Promise<Meeting | null> {
   const client = await db();
@@ -182,7 +191,7 @@ export async function saveSummary(
 export async function listMeetings(): Promise<Meeting[]> {
   const client = await db();
   const result = await client.execute(
-    `SELECT ${PUBLIC_COLUMNS} FROM meetings ORDER BY created_at DESC`,
+    `SELECT ${CARD_COLUMNS} FROM meetings ORDER BY created_at DESC`,
   );
   return result.rows as unknown as Meeting[];
 }

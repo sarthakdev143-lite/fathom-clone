@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { MeetingSummary } from "@/lib/summary";
 
 /**
@@ -47,6 +47,24 @@ function pickMimeType(): string | null {
     MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) ?? null
   );
 }
+
+function detectRecordingSupport(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof MediaRecorder !== "undefined" &&
+    Boolean(navigator.mediaDevices?.getUserMedia)
+  );
+}
+
+/**
+ * The recording capability is null on the server, because there is no
+ * `navigator` there. `useSyncExternalStore` is the supported way to read a value
+ * that legitimately differs between server and client: it reports `null` while
+ * rendering on the server and the real answer on the client, without a
+ * hydration mismatch and without setting state inside an effect.
+ */
+const subscribeToNothing = () => () => {};
+const serverSnapshot = () => null;
 
 function extensionFor(mimeType: string): string {
   const base = mimeType.split(";")[0].trim();
@@ -123,7 +141,12 @@ export default function Recorder() {
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
   const [meterActive, setMeterActive] = useState(false);
-  const [supported, setSupported] = useState<boolean | null>(null);
+
+  const supported = useSyncExternalStore(
+    subscribeToNothing,
+    detectRecordingSupport,
+    serverSnapshot,
+  );
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -146,14 +169,7 @@ export default function Recorder() {
     setMeterActive(false);
   }, []);
 
-  useEffect(() => {
-    setSupported(
-      typeof navigator !== "undefined" &&
-        typeof MediaRecorder !== "undefined" &&
-        Boolean(navigator.mediaDevices?.getUserMedia),
-    );
-    return releaseStream;
-  }, [releaseStream]);
+  useEffect(() => releaseStream, [releaseStream]);
 
   const startRecording = useCallback(async () => {
     setError(null);
