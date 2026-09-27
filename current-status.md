@@ -136,46 +136,83 @@ existed), the summarize API returns it as `transcriptCoverage`, and the detail
 page badges it so a reader knows the summary is narrower than the transcript.
 Lifting the ceiling means chunking the audio and merging the segment offsets.
 
-**3. No retry affordance for a failed meeting.** The detail page is read-only, so
+**3. Live mode is rate-limited and capped, and those caps are load-bearing.**
+
+| Threshold | Value | Behaviour |
+| --- | --- | --- |
+| Baseline chunk cadence | 6 s | One slice of audio per tick while healthy. |
+| Backoff step | x2 | Any 429 or 5xx from the chunk or summary call. |
+| Backoff ceiling | 60 s | Cadence doubles to this and stops there. |
+| Cadence reset | on success | Any successful slice returns it to 6 s. |
+| Live ceiling | 20 min | Live updates stop; recording and the final summary continue. |
+| Max slice length | 20 s | A slice is trimmed to its most recent 20 s. |
+| Poll interval | 2 s | Caption and summary deltas, guarded against overlap. |
+| Summary refresh | every 35 s of new audio | Provisional summary regeneration. |
+
+Three things are deliberate here. A rate limit is logged and ridden out rather
+than surfaced, because a person recording should not be interrupted by billing.
+A failed slice is **dropped, not re-queued** — re-queuing grows the buffer on
+every failure until the slice exceeds the request limit and live mode fails for
+good. And the 20-second slice cap exists because the backoff created a bug
+without it: at the 60-second ceiling a slice would carry a full minute of 48 kHz
+audio, about 5.8 MB, which the server rejects at 4 MB, so every request after a
+backoff would fail and the live captions would die exactly when the safety net
+was supposed to help. Trimming to the most recent 20 seconds bounds the request
+permanently, and the dropped span shows up as a gap in the timestamps.
+
+None of this touches the authoritative pipeline. The backoff state lives only in
+the browser hook, the post-stop transcribe and summary are separate requests
+against separate routes, and the live summary is a preview that the real one
+overwrites. Verified by forcing 429s through to the 60-second ceiling and then
+confirming the post-stop transcribe and summarize still completed in 6.0 s and
+6.6 s.
+
+**4. No retry affordance for a failed meeting.** The detail page is read-only, so
 a meeting stuck in `failed` has to be re-driven from the record page. Both
 `transcribe` and `summarize` are safely re-runnable; only the UI affordance is
 missing.
 
-**4. Abandoned live sessions linger.** Closing the tab mid-recording leaves the row
+**5. Abandoned live sessions linger.** Closing the tab mid-recording leaves the row
 in `live` forever, since nothing server-side knows the browser is gone. The
 dashboard labels such rows "Interrupted" after two minutes of silence rather
 than pretending they are still recording, but the audio and partial transcript are
 not cleaned up automatically.
 
-**5. Live captions can contain seam artifacts.** Each 6-second slice is
+**6. Live captions can contain seam artifacts.** Each 6-second slice is
 transcribed independently, so a sentence spanning a boundary can be cut or
 repeated. This is exactly why the authoritative transcript re-transcribes the
 complete audio rather than reusing the live one, and why the live view is
 labelled provisional.
 
-**6. Live mode costs extra model calls.** A 30-minute meeting sends 300 chunk
+**7. Live mode costs extra model calls.** A 30-minute meeting sends 300 chunk
 transcriptions plus roughly 50 summary refreshes. It is off by default only for
 uploads, not for recordings - recordings default to on, because a user who
 records a meeting usually wants the live view. The toggle is in the capture
 panel.
 
-**7. No audio playback.** The audio is stored in blob storage, but there is no
+**8. No audio playback.** The audio is stored in blob storage, but there is no
 endpoint to stream it back. Out of scope for the five steps.
 
-**8. `npm run db:seed` calls the live Groq API** four times. It also deletes
+**9. `npm run db:seed` calls the live Groq API** four times. It also deletes
 existing `source = 'seed'` rows first, which makes it idempotent but not
 free.
 
-**9. The summariser is not retried at the parse layer.** Rate limits and 5xx are
-retried with backoff, and malformed JSON is parsed defensively, but if the model
-returns valid JSON of the wrong shape the meeting is marked `failed` and needs a
-manual re-run.
+**10. The summariser is not retried when the model refuses to produce JSON.**
+Rate limits and 5xx are retried with backoff and malformed JSON is parsed
+defensively, but two failure modes still need a manual re-run. Groq sometimes
+answers a `json_object` request with HTTP 400 `failed_generation`, which is not a
+retryable status, so the meeting goes straight to `failed`. And if the model
+returns valid JSON of the wrong shape, the same happens. Both were observed while
+testing - a single transient `failed_generation` cost one meeting its summary,
+and re-running produced one immediately. A future fix would retry a 400 whose
+error code is `failed_generation`, or drop `response_format` and lean on the
+defensive parser that already exists.
 
-**10. No authentication.** Anyone who can reach the app can list every meeting and
+**11. No authentication.** Anyone who can reach the app can list every meeting and
 open any meeting whose id they have. Blob URLs contain a random suffix, so the
 audio is not trivially guessable, but that is obscurity, not access control.
 
-**11. `vercel env add` will not overwrite an existing variable.** It errors
+**12. `vercel env add` will not overwrite an existing variable.** It errors
 instead, and a `--force` flag is not accepted by this CLI version. Rotating a key
 means `vercel env rm <NAME> production --yes` followed by a fresh `add`. Related:
 `vercel blob create-store --yes` **overwrites `.env.local`** with the project's
