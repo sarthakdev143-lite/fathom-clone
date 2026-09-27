@@ -15,9 +15,9 @@ Needs Node 20.9+.
 npm install
 ```
 
-Set `GROQ_API_KEY` (transcription and summarization), `TURSO_DATABASE_URL` and
-`TURSO_AUTH_TOKEN` in `.env.local`. The Turso pair is optional in development,
-where a local SQLite file is used instead.
+Set `GROQ_API_KEY` (transcription and summarization), `BLOB_READ_WRITE_TOKEN`
+(audio storage), `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in `.env.local`.
+The Turso pair is optional in development, where a local SQLite file is used.
 
 ```bash
 npm run dev
