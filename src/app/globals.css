@@ -461,3 +461,20 @@ code {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+
+.stub {
+  margin-top: 1.25rem;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+}
+
+.stub summary {
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.stub[open] summary {
+  margin-bottom: 0.6rem;
+}

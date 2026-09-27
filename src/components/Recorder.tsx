@@ -631,6 +631,27 @@ export default function Recorder() {
             Upload accepts anything your browser can play as audio or video, so
             phone voice memos work too.
           </p>
+
+          <details className="stub">
+            <summary>Import from a meeting link</summary>
+            <p className="muted small" style={{ marginBottom: 0 }}>
+              Joining Zoom, Google Meet or Teams with a bot is explicitly out of
+              scope for this build, so this does nothing. See{" "}
+              <code>src/lib/bot-join.ts</code> for what it would actually take.
+            </p>
+            <div className="row" style={{ marginTop: "0.75rem" }}>
+              <button
+                type="button"
+                className="btn"
+                disabled
+                title="Not implemented"
+                onClick={() => undefined}
+              >
+                Paste a meeting link
+              </button>
+            </div>
+          </details>
+
           <input
             ref={fileInputRef}
             type="file"
