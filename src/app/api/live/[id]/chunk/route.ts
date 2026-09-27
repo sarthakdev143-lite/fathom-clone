@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
-import { hasGroqKey, isDbConfigured } from "@/lib/config";
-import { transcribeAudio, GroqError } from "@/lib/groq";
+import { hasGeminiKey, GeminiError } from "@/lib/gemini";
+import { GroqError } from "@/lib/groq";
+import { isDbConfigured, hasGroqKey } from "@/lib/config";
 import { appendLiveSegments } from "@/lib/live";
 import { refreshLiveSummaryIfDue } from "@/lib/live-summary";
+import { transcribeAudio } from "@/lib/providers";
 import type { TranscriptSegment } from "@/lib/meetings";
 
 export const runtime = "nodejs";
@@ -24,9 +26,15 @@ const MAX_CHUNK_BYTES = 4 * 1024 * 1024;
  * chunks that cannot be transcribed at all.
  */
 export async function POST(request: Request, context: Context) {
-  if (!isDbConfigured || !hasGroqKey) {
+  if (!isDbConfigured) {
     return NextResponse.json(
       { error: "Live mode is not configured on this deployment." },
+      { status: 503 },
+    );
+  }
+  if (!hasGroqKey && !hasGeminiKey) {
+    return NextResponse.json(
+      { error: "No transcription provider is configured." },
       { status: 503 },
     );
   }
@@ -78,7 +86,10 @@ export async function POST(request: Request, context: Context) {
     // unacceptable and retrying it will never help. Collapsing both into one
     // 502 would make the client either hammer a rate limit or give up on a
     // transient error.
-    const status = err instanceof GroqError ? err.status : 502;
+    const status =
+      err instanceof GroqError || err instanceof GeminiError
+        ? err.status
+        : 502;
     return NextResponse.json(
       {
         error: err instanceof Error ? err.message : "Chunk transcription failed.",
@@ -90,12 +101,30 @@ export async function POST(request: Request, context: Context) {
     );
   }
 
-  // Shift the chunk-local offsets into the meeting's timeline.
-  const segments: TranscriptSegment[] = result.segments.map((segment) => ({
-    start: round2(segment.start + startAt),
-    end: round2(segment.end + startAt),
-    text: segment.text,
-  }));
+  /*
+   * Groq returns per-segment offsets within the slice; Gemini returns one block
+   * of text with no internal timings. In that case the whole slice becomes a
+   * single segment spanning its own duration. That is honest about what is
+   * known: the caption is correct, only the internal split is missing, and the
+   * authoritative transcript is re-derived from the complete audio afterwards.
+   */
+  const sliceSeconds = totalSeconds > startAt ? totalSeconds - startAt : 0;
+  const segments: TranscriptSegment[] =
+    result.segments.length > 0
+      ? result.segments.map((segment) => ({
+          start: round2(segment.start + startAt),
+          end: round2(segment.end + startAt),
+          text: segment.text,
+        }))
+      : result.text
+        ? [
+            {
+              start: round2(startAt),
+              end: round2(startAt + Math.max(1, sliceSeconds)),
+              text: result.text,
+            },
+          ]
+        : [];
 
   if (segments.length > 0) {
     await appendLiveSegments({

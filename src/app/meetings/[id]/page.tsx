@@ -123,6 +123,15 @@ export default async function MeetingPage({
         </p>
       )}
 
+      {meeting.transcript_provider === "gemini" && (
+        <p className="fallback-note" role="status">
+          Transcribed by the Gemini fallback
+          {meeting.transcript_fallback_reason
+            ? ` after Groq failed: ${meeting.transcript_fallback_reason}`
+            : "."}
+        </p>
+      )}
+
       {summary ? (
         <section className="card" style={{ marginBottom: "1.5rem" }}>
           <h2 className="section-title">

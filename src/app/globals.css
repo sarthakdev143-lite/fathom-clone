@@ -599,6 +599,15 @@ code {
   font-weight: 500;
 }
 
+.fallback-note {
+  margin: 0 0 1.25rem;
+  padding: 0.6rem 0.85rem;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .live-paused {
   margin: 0 0 1.25rem;
   padding: 0.8rem 0.95rem;

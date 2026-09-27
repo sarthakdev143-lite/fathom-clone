@@ -1,4 +1,6 @@
-import { chatCompletion } from "./groq";
+import { GeminiError } from "./gemini";
+import { GroqError } from "./groq";
+import { runSummary } from "./providers";
 import {
   getSegments,
   requireMeeting,
@@ -19,6 +21,8 @@ export interface SummarizeOutcome {
   sampled: boolean;
   segmentsUsed: number;
   segmentsTotal: number;
+  provider: "groq" | "gemini";
+  fallbackReason: string | null;
 }
 
 /**
@@ -47,7 +51,7 @@ export async function summarizeMeeting(
     segments,
   });
 
-  const completion = await chatCompletion({
+  const completion = await runSummary({
     model: SUMMARY_MODEL,
     system: SYSTEM_PROMPT,
     user: prompt,
@@ -66,5 +70,9 @@ export async function summarizeMeeting(
     sampled,
     segmentsUsed,
     segmentsTotal,
+    provider: completion.provider,
+    fallbackReason: completion.fallbackReason,
   };
 }
+
+export { GeminiError, GroqError };

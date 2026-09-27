@@ -68,6 +68,10 @@ const MIGRATIONS: string[][] = [
   // module-level counter would reset on every serverless cold start and refresh
   // far more often than intended.
   [`ALTER TABLE meetings ADD COLUMN live_summary_audio_seconds REAL NOT NULL DEFAULT 0`],
+  // 6 -> 7: which provider produced the transcript, so a Gemini fallback is
+  // visible rather than invisible. NULL on meetings transcribed before this.
+  [`ALTER TABLE meetings ADD COLUMN transcript_provider TEXT`],
+  [`ALTER TABLE meetings ADD COLUMN transcript_fallback_reason TEXT`],
 ];
 
 export const isRemoteDb = Boolean(process.env.TURSO_DATABASE_URL);

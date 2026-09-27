@@ -60,7 +60,8 @@ export async function createMeeting(input: {
 /** Everything except `audio_blob`, for a single-meeting read. */
 const PUBLIC_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_bytes,
        duration_seconds, status, status_error, transcript, transcript_language,
-       summary_json, audio_url, transcript_sampled, created_at, updated_at`;
+       summary_json, audio_url, transcript_sampled, transcript_provider,
+       transcript_fallback_reason, created_at, updated_at`;
 
 /**
  * The dashboard only renders title, metadata, status and the summary, so listing
@@ -174,12 +175,14 @@ export async function setStatus(
 export async function saveTranscript(
   id: string,
   transcript: Transcript,
+  meta?: { provider?: string | null; fallbackReason?: string | null },
 ): Promise<void> {
   const client = await db();
   await client.execute({
     sql: `UPDATE meetings
           SET transcript = ?, transcript_language = ?, duration_seconds = COALESCE(?, duration_seconds),
-              transcript_segments_json = ?, status = ?, status_error = NULL, updated_at = ?
+              transcript_segments_json = ?, status = ?, status_error = NULL,
+              transcript_provider = ?, transcript_fallback_reason = ?, updated_at = ?
           WHERE id = ?`,
     args: [
       transcript.text,
@@ -187,6 +190,8 @@ export async function saveTranscript(
       transcript.duration,
       JSON.stringify(transcript.segments),
       "transcribed",
+      meta?.provider ?? null,
+      meta?.fallbackReason ?? null,
       new Date().toISOString(),
       id,
     ],

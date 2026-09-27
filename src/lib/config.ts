@@ -15,6 +15,9 @@ export const isDbConfigured = Boolean(process.env.TURSO_DATABASE_URL) || !isVerc
 
 export const hasGroqKey = Boolean(process.env.GROQ_API_KEY);
 
+/** Optional fallback provider, used only when Groq fails. */
+export const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY);
+
 export const hasBlobToken = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 
 /** Audio upload needs blob storage; without it the record page cannot work. */
@@ -54,6 +57,15 @@ export function setupIssues(): SetupIssue[] {
       problem:
         "Transcription and summarization are unavailable without a Groq API key.",
       fix: "Set GROQ_API_KEY in the Vercel project environment.",
+    });
+  }
+
+  if (!hasGroqKey && !hasGeminiKey) {
+    issues.push({
+      envVar: "GEMINI_API_KEY",
+      problem:
+        "There is no fallback provider, so a Groq outage takes transcription and summarization down entirely.",
+      fix: "Set GEMINI_API_KEY in the Vercel project environment to enable the fallback.",
     });
   }
 

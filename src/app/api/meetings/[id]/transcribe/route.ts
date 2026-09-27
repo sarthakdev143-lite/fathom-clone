@@ -8,7 +8,9 @@ import {
   setStatus,
   type AudioSource,
 } from "@/lib/meetings";
-import { GroqError, looksLikeSpeech, transcribeAudio } from "@/lib/groq";
+import { GeminiError, hasGeminiKey } from "@/lib/gemini";
+import { GroqError, looksLikeSpeech } from "@/lib/groq";
+import { transcribeAudio } from "@/lib/providers";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,9 +25,16 @@ export async function POST(_request: Request, context: Context) {
     );
   }
 
-  if (!hasGroqKey) {
+  // At least one provider must exist. Demanding Groq specifically would block a
+  // Gemini-only deployment, which is a legitimate configuration for this
+  // fallback to be useful in.
+  if (!hasGroqKey && !hasGeminiKey) {
     return NextResponse.json(
-      { error: "GROQ_API_KEY is not set, so transcription is unavailable." },
+      {
+        error:
+          "No transcription provider is configured. Set GROQ_API_KEY, or " +
+          "GEMINI_API_KEY to use the fallback.",
+      },
       { status: 503 },
     );
   }
@@ -33,6 +42,7 @@ export async function POST(_request: Request, context: Context) {
   const { id } = await context.params;
 
   let audio: AudioSource;
+  let knownDuration: number | null;
 
   try {
     const meeting = await requireMeeting(id);
@@ -45,6 +55,7 @@ export async function POST(_request: Request, context: Context) {
       );
     }
     audio = loaded;
+    knownDuration = meeting.duration_seconds;
   } catch (err) {
     if (err instanceof NotFoundError) {
       return NextResponse.json({ error: err.message }, { status: 404 });
@@ -63,7 +74,7 @@ export async function POST(_request: Request, context: Context) {
       mimeType: audio.mimeType,
     });
 
-    if (!looksLikeSpeech(result.text, result.duration)) {
+    if (!looksLikeSpeech(result.text, result.duration ?? knownDuration)) {
       // Whisper hallucinated filler for non-speech audio. Recording this as a
       // success would let step 3 summarise audio that contains no meeting.
       await setStatus(
@@ -77,12 +88,16 @@ export async function POST(_request: Request, context: Context) {
       );
     }
 
-    await saveTranscript(id, {
-      text: result.text,
-      language: result.language,
-      duration: result.duration,
-      segments: result.segments,
-    });
+    await saveTranscript(
+      id,
+      {
+        text: result.text,
+        language: result.language,
+        duration: result.duration,
+        segments: result.segments,
+      },
+      { provider: result.provider, fallbackReason: result.fallbackReason },
+    );
 
     const meeting = await requireMeeting(id);
     return NextResponse.json({
@@ -92,11 +107,13 @@ export async function POST(_request: Request, context: Context) {
         segments: result.segments.length,
         language: result.language,
         duration: result.duration,
+        provider: result.provider,
+        fallbackReason: result.fallbackReason,
       },
     });
   } catch (err) {
     const detail =
-      err instanceof GroqError
+      err instanceof GroqError || err instanceof GeminiError
         ? `${err.message}: ${err.detail}`
         : err instanceof Error
           ? err.message
