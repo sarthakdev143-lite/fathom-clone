@@ -11,7 +11,6 @@
 import { createMeeting, setStatus } from "../src/lib/meetings";
 import { summarizeMeeting } from "../src/lib/summarize";
 import { db } from "../src/lib/db";
-import type { MeetingSummary } from "../src/lib/summary";
 
 interface SeedMeeting {
   title: string;
@@ -241,10 +240,11 @@ async function main() {
 
     process.stdout.write(`Summarising "${seed.title}"... `);
     try {
-      const summary: MeetingSummary = await summarizeMeeting(meeting.id);
+      const { summary, sampled } = await summarizeMeeting(meeting.id);
       console.log(
         `ok (${summary.topics.length} topics, ${summary.decisions.length} decisions, ` +
-          `${summary.action_items.length} action items, ${summary.key_moments.length} key moments)`,
+          `${summary.action_items.length} action items, ${summary.key_moments.length} key moments` +
+          `${sampled ? ", transcript sampled to fit the prompt budget" : ""})`,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

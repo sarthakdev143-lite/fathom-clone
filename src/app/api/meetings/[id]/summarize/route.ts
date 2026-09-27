@@ -44,8 +44,14 @@ export async function POST(_request: Request, context: Context) {
   }
 
   try {
-    const summary = await summarizeMeeting(id);
-    return NextResponse.json({ meeting: await requireMeeting(id), summary });
+    const { summary, sampled, segmentsUsed, segmentsTotal } =
+      await summarizeMeeting(id);
+
+    return NextResponse.json({
+      meeting: await requireMeeting(id),
+      summary,
+      transcriptCoverage: { sampled, segmentsUsed, segmentsTotal },
+    });
   } catch (err) {
     const detail =
       err instanceof GroqError

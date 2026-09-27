@@ -13,6 +13,14 @@ import {
   type MeetingSummary,
 } from "./summary";
 
+export interface SummarizeOutcome {
+  summary: MeetingSummary;
+  /** True when the transcript was sampled to fit the prompt budget. */
+  sampled: boolean;
+  segmentsUsed: number;
+  segmentsTotal: number;
+}
+
 /**
  * The whole of step 3 in one function: read the transcript, make a single
  * prompt call, parse the JSON, store it. Shared by the HTTP route and the seed
@@ -21,7 +29,9 @@ import {
  * Throws on failure; the caller is responsible for recording the error on the
  * meeting, because only the caller knows the HTTP or CLI context.
  */
-export async function summarizeMeeting(id: string): Promise<MeetingSummary> {
+export async function summarizeMeeting(
+  id: string,
+): Promise<SummarizeOutcome> {
   const meeting = await requireMeeting(id);
 
   if (!meeting.transcript || meeting.transcript.trim() === "") {
@@ -31,14 +41,16 @@ export async function summarizeMeeting(id: string): Promise<MeetingSummary> {
   const segments = await getSegments(id);
   await setStatus(id, "summarizing");
 
+  const { prompt, sampled, segmentsUsed, segmentsTotal } = buildSummaryPrompt({
+    title: meeting.title,
+    transcript: meeting.transcript,
+    segments,
+  });
+
   const completion = await chatCompletion({
     model: SUMMARY_MODEL,
     system: SYSTEM_PROMPT,
-    user: buildSummaryPrompt({
-      title: meeting.title,
-      transcript: meeting.transcript,
-      segments,
-    }),
+    user: prompt,
     temperature: 0.2,
     maxTokens: 2000,
     jsonMode: true,
@@ -47,5 +59,12 @@ export async function summarizeMeeting(id: string): Promise<MeetingSummary> {
   const summary = parseSummary(completion.content);
   await saveSummary(id, summary);
 
-  return summary;
+  return {
+    summary,
+    // Surfaced so a caller can tell a full read of the meeting from a sampled
+    // one, which is a materially weaker summary.
+    sampled,
+    segmentsUsed,
+    segmentsTotal,
+  };
 }

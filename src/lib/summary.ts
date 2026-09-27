@@ -57,6 +57,67 @@ Rules:
 - Return empty arrays rather than placeholder text when a category has no entries.
 - Only use information present in the transcript. If a detail was never stated, leave it null.`;
 
+/**
+ * Groq's on-demand tier allows 8,000 tokens per minute, which also caps any
+ * single request. A 32-minute transcript is roughly 35,000 characters, so a long
+ * meeting cannot be sent in one piece and the request fails outright with a 413
+ * rather than degrading.
+ *
+ * The budget is deliberately well under the ceiling to leave room for the system
+ * prompt and the JSON response. When a transcript does not fit, segments are
+ * sampled evenly across the whole meeting rather than truncated at the start, so
+ * the model still sees the arc of the conversation and the timestamps it cites
+ * stay real.
+ */
+const MAX_TRANSCRIPT_CHARS = 24_000;
+
+export interface PromptBuild {
+  prompt: string;
+  /** True when segments were dropped to fit the token budget. */
+  sampled: boolean;
+  segmentsUsed: number;
+  segmentsTotal: number;
+}
+
+function renderSegments(
+  segments: { start: number; end: number; text: string }[],
+  sampled: boolean,
+): string {
+  const lines = segments.map(
+    (segment) =>
+      `[${segment.start.toFixed(2)}-${segment.end.toFixed(2)}] ${segment.text}`,
+  );
+  if (lines.length === 0) return "(no transcript segments were available)";
+  if (!sampled) return lines.join("\n");
+  return (
+    lines.join("\n") +
+    "\n\n(some segments between these lines were omitted to fit the prompt's size " +
+      "limit. Order and timestamps are unchanged.)"
+  );
+}
+
+/**
+ * Returns the segments to send, either all of them or an evenly spaced sample
+ * that fits `budget` characters.
+ */
+function fitSegments(
+  segments: { start: number; end: number; text: string }[],
+  budget: number,
+): { segments: typeof segments; sampled: boolean } {
+  if (renderSegments(segments, false).length <= budget) {
+    return { segments, sampled: false };
+  }
+
+  let current = segments;
+  // Halving converges quickly and always keeps a chronological, evenly spaced
+  // subset, so no single early passage dominates.
+  while (current.length > 1 && renderSegments(current, true).length > budget) {
+    current = current.filter((_, index) => index % 2 === 0);
+  }
+
+  return { segments: current, sampled: true };
+}
+
 export interface SummarizeInput {
   title: string;
   transcript: string;
@@ -65,34 +126,38 @@ export interface SummarizeInput {
 }
 
 /**
- * Builds the user half of the prompt. The transcript is annotated with the exact
- * offsets that `key_moments` must cite, so the model is choosing among real
- * timestamps rather than estimating them.
+ * Builds the user half of the prompt.
+ *
+ * The timestamped segments are the single source of the transcript text: they
+ * already contain every word, so appending the transcript again would double
+ * the token cost of every call for no extra information.
  */
-export function buildSummaryPrompt(input: SummarizeInput): string {
-  const lines = [
+export function buildSummaryPrompt(input: SummarizeInput): PromptBuild {
+  const { segments, sampled } = fitSegments(input.segments, MAX_TRANSCRIPT_CHARS);
+
+  // A meeting with no usable segments still needs summarising, so fall back to
+  // the plain transcript in that case.
+  const body =
+    input.segments.length > 0
+      ? renderSegments(segments, sampled)
+      : input.transcript;
+
+  const prompt = [
     `Meeting title: ${input.title}`,
     "",
     "Timestamped transcript. The [start-end] values are offsets in seconds:",
     "",
-  ];
-
-  for (const segment of input.segments) {
-    lines.push(
-      `[${segment.start.toFixed(2)}-${segment.end.toFixed(2)}] ${segment.text}`,
-    );
-  }
-
-  lines.push(
-    "",
-    "Full transcript:",
-    "",
-    input.transcript,
+    body,
     "",
     "Return the JSON object now.",
-  );
+  ].join("\n");
 
-  return lines.join("\n");
+  return {
+    prompt,
+    sampled,
+    segmentsUsed: segments.length,
+    segmentsTotal: input.segments.length,
+  };
 }
 
 /**
