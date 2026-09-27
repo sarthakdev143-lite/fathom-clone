@@ -22,6 +22,7 @@ tree is clean and green.
 | 4 | Dashboard + detail | Both render, unknown id → 404. |
 | 5 | Seed | 4 meetings summarised through the real pipeline. 23/23 key moments land exactly on real segment starts. |
 | 6 | Live mode | Additive. Verified in production with real speech: captions at 6s intervals, provisional summary every ~35s of new audio, then the unchanged authoritative pipeline. |
+| 7 | Gemini fallback | Verified in production by deleting `GROQ_API_KEY` from Vercel and re-running: transcription and summary both completed via Gemini. |
 
 The pipeline was also run end to end **against the production deployment**:
 2.24 MB upload → 201, transcribe 3.9s, summarize 3.2s, detail page 200.
@@ -59,7 +60,10 @@ a terminal state carrying `status_error`. Each stage can be re-run on its own.
 | `TURSO_DATABASE_URL` | any persistence | Falls back to a local SQLite file in development. Required on Vercel. |
 | `TURSO_AUTH_TOKEN` | remote database | |
 | `BLOB_READ_WRITE_TOKEN` | audio upload | Vercel Blob store token. `vercel blob create-store --access public --yes` provisions it. |
-| `GROQ_API_KEY` | steps 2 and 3 | |
+| `GROQ_API_KEY` | steps 2 and 3 | Primary provider. |
+| `GEMINI_API_KEY` | optional | Fallback provider, used only when Groq fails. |
+| `GEMINI_TRANSCRIBE_MODEL` | optional | Defaults to `gemini-3.5-transcribe`. |
+| `GEMINI_SUMMARY_MODEL` | optional | Defaults to `gemini-3.5-flash`. |
 | `SUMMARY_MODEL` | optional | Defaults to `openai/gpt-oss-120b`. |
 
 If a variable is missing in production the app renders a setup notice naming the
@@ -111,6 +115,62 @@ audio. The throttle position is stored in the database rather than in module
 memory, because a module-level counter resets on every serverless cold start and
 would refresh far more often than intended. A dropped provisional summary never
 fails the caption stream; the authoritative summary comes later regardless.
+
+## Provider fallback
+
+Groq is the primary for both transcription and summarization. Gemini is a
+fallback so a Groq outage degrades the product instead of breaking it. Selection
+lives in one place, `src/lib/providers.ts`, and the routes are unchanged.
+
+**What triggers a fallback** - only failures that are the provider's fault: 401,
+403, 429, 5xx, and a missing key. A 400 is *not* retried, because retrying a
+rejected request against a second provider turns one user error into two billable
+calls. Verified: a simulated Groq 503 and 429 both fall through to Gemini, and a
+simulated 400 does not.
+
+**Verified in production by actually removing the key.** `GROQ_API_KEY` was
+deleted from Vercel, the app redeployed, and a full recording ran end to end:
+
+| | Groq present | Groq removed |
+| --- | --- | --- |
+| Transcription provider | `groq`, 6 segments | `gemini`, 0 segments |
+| Fallback reason | - | `GROQ_API_KEY is not set` |
+| Summary | produced | produced |
+| Detail page | no note | "Transcribed by the Gemini fallback" |
+
+`transcript_provider` and `transcript_fallback_reason` are stored on the meeting
+so a fallback is visible rather than silent.
+
+**The two providers are not equivalent**, and pretending otherwise would be
+misleading:
+
+- **No timestamps.** `gemini-3.5-transcribe` returns one block of text with no
+  word or segment timings. The live chunk path therefore emits one caption per
+  slice rather than Whisper's finer segmentation, and `key_moments` cites slice
+  boundaries. The caption is still correct; only the internal split is missing.
+- **The response shape is unusual.** The transcript arrives as
+  `part.audioTranscription.text`, and `part.text` on the same part is empty.
+  Reading `text` reports a blank transcript for a call that consumed the audio
+  successfully. This cost a debugging cycle and is now asserted in a test.
+- **Slower.** A 32-minute file took 83s, against roughly 18s for Whisper.
+- **14 MB inline ceiling.** Verified working at 14.5 MB of base64. Larger audio
+  is refused with an explicit message rather than an opaque 400; covering it
+  would mean the Files API.
+
+**Summarization falls back too**, to `gemini-3.5-flash` with
+`responseMimeType: application/json`. This goes slightly beyond a transcription
+fallback, but the chat endpoint is the one that rate-limits hardest, and without
+it a Groq outage would leave meetings with a transcript and no summary - which is
+not a degraded product, just a broken one with extra steps.
+
+**`gemini-3.5-transcribe-live` is deliberately not used.** It exists, but only
+through the Live API's stateful WebSocket. A Vercel function cannot hold one open
+for the length of a meeting, which is the same limit that ruled out SSE. Live
+captions use the unary model, one call per slice, and therefore keep the
+rate-limit backoff and 20-minute ceiling described in known limit 3. Running the
+real Live API would need a browser-to-Google WebSocket, which puts the API key in
+client-visible code and in the network tab of every user. That is a real decision
+with a real security cost, not something to slip in, so it is not implemented.
 
 ## Known limits, deliberately not addressed
 
