@@ -1,4 +1,5 @@
 export type MeetingStatus =
+  | "live"
   | "uploaded"
   | "transcribing"
   | "transcribed"
@@ -29,6 +30,12 @@ export interface Meeting {
    * summarised before this was recorded.
    */
   transcript_sampled?: number | null;
+  /** Bumped whenever live segments are appended, so a poller can detect change. */
+  live_seq?: number;
+  /** Bumped whenever the provisional live summary is replaced. */
+  live_summary_seq?: number;
+  /** How much audio the live pipeline has consumed, in seconds. */
+  live_audio_seconds?: number;
   created_at: string;
   updated_at: string;
 }

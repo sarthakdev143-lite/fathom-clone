@@ -536,6 +536,109 @@ code {
   margin-bottom: 0.6rem;
 }
 
+.check {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  margin: 1rem 0 0.9rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.check input {
+  margin-top: 0.25rem;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.check span {
+  display: block;
+}
+
+.live-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.85rem;
+  text-align: left;
+  margin-bottom: 1.25rem;
+}
+
+@media (max-width: 46rem) {
+  .live-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.live-panel {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.85rem 0.95rem;
+  min-width: 0;
+}
+
+.live-panel h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.live-badge {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+  font-size: 0.62rem;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.captions {
+  max-height: 13rem;
+  overflow-y: auto;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.captions p {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.captions code {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-right: 0.2rem;
+}
+
+/* A brief wash when a new provisional summary lands, so the change is
+   noticeable without being loud. */
+.live-summary-body {
+  animation: live-flash 1.4s ease-out;
+}
+
+@keyframes live-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-summary-body {
+    animation: none;
+  }
+}
+
 .setup-notice {
   border: 1px solid var(--line);
   border-left: 3px solid #d97706;

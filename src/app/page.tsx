@@ -7,6 +7,7 @@ import type { Meeting, MeetingStatus } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 const STATUS_LABELS: Record<MeetingStatus, string> = {
+  live: "Recording",
   uploaded: "Awaiting transcription",
   transcribing: "Transcribing",
   transcribed: "Awaiting summary",

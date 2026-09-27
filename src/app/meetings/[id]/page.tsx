@@ -9,6 +9,7 @@ import type { MeetingStatus } from "@/lib/types";
 export const dynamic = "force-dynamic";
 
 const STATUS_LABELS: Record<MeetingStatus, string> = {
+  live: "Recording",
   uploaded: "Awaiting transcription",
   transcribing: "Transcribing",
   transcribed: "Awaiting summary",
@@ -16,6 +17,20 @@ const STATUS_LABELS: Record<MeetingStatus, string> = {
   ready: "Ready",
   failed: "Failed",
 };
+
+/**
+ * A live session whose row has not moved for a while means the browser went away
+ * mid-recording. Without this the dashboard would show it as still recording
+ * forever, which is worse than admitting the tab closed.
+ */
+const LIVE_STALE_SECONDS = 120;
+
+function isStaleLive(status: MeetingStatus, updatedAt: string): boolean {
+  if (status !== "live") return false;
+  const updated = new Date(updatedAt).getTime();
+  if (Number.isNaN(updated)) return true;
+  return (Date.now() - updated) / 1000 > LIVE_STALE_SECONDS;
+}
 
 function formatDuration(totalSeconds: number | null): string {
   if (totalSeconds === null || !Number.isFinite(totalSeconds)) return "unknown";
@@ -88,8 +103,17 @@ export default async function MeetingPage({
               : ""}
           </p>
         </div>
-        <span className={`pill pill-${meeting.status}`}>
-          {STATUS_LABELS[meeting.status]}
+        <span
+          className={`pill pill-${meeting.status}`}
+          title={
+            isStaleLive(meeting.status, meeting.updated_at)
+              ? "This recording has not been updated for a few minutes, so the tab that was capturing it has probably closed."
+              : undefined
+          }
+        >
+          {isStaleLive(meeting.status, meeting.updated_at)
+            ? "Interrupted"
+            : STATUS_LABELS[meeting.status]}
         </span>
       </div>
 

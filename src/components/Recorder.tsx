@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { upload } from "@vercel/blob/client";
+import { useLiveSession } from "@/lib/use-live-session";
 import type { MeetingSummary } from "@/lib/summary";
 
 /**
@@ -164,6 +165,8 @@ export default function Recorder() {
   } | null>(null);
   const [summary, setSummary] = useState<MeetingSummary | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [liveEnabled, setLiveEnabled] = useState(true);
+  const live = useLiveSession();
   const [title, setTitle] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
@@ -174,6 +177,21 @@ export default function Recorder() {
     detectRecordingSupport,
     serverSnapshot,
   );
+
+  // Captions should follow the newest speech without the reader having to
+  // scroll. Sticky at the bottom means it only auto-scrolls when already there,
+  // so a reader who has scrolled back is not yanked away.
+  const captionScrollRef = useRef<HTMLDivElement | null>(null);
+  const captionCountRef = useRef(0);
+  useEffect(() => {
+    const count = live.captions.length;
+    if (count === captionCountRef.current) return;
+    captionCountRef.current = count;
+    const el = captionScrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 120) el.scrollTop = el.scrollHeight;
+  }, [live.captions]);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -277,47 +295,72 @@ export default function Recorder() {
 
     recorder.start(1000);
     setPhase("recording");
+
+    // The AudioContext is created up front and shared with the live session, so
+    // the level meter and the PCM tap share one graph and one native stream.
+    let audioCtx: AudioContext | null = null;
+    try {
+      audioCtx = new AudioContext();
+      audioCtxRef.current = audioCtx;
+    } catch {
+      setMeterActive(false);
+    }
+
+    if (audioCtx) {
+      try {
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        audioCtx.createMediaStreamSource(stream).connect(analyser);
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        setMeterActive(true);
+
+        const tick = () => {
+          analyser.getByteTimeDomainData(data);
+          let peak = 0;
+          for (let i = 0; i < data.length; i++) {
+            peak = Math.max(peak, Math.abs(data[i] - 128) / 128);
+          }
+          setLevel(peak);
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        rafRef.current = requestAnimationFrame(tick);
+      } catch {
+        // A missing level meter is not worth failing a recording over.
+        setMeterActive(false);
+      }
+
+      if (liveEnabled) {
+        await live.start({
+          stream,
+          audioContext: audioCtx,
+          title: title.trim() || "Live meeting",
+        });
+      }
+    }
     setElapsed(0);
 
     timerRef.current = setInterval(
-      () => setElapsed((performance.now() - startedAt) / 1000),
+      () => {
+        const seconds = (performance.now() - startedAt) / 1000;
+        setElapsed(seconds);
+        live.tick(seconds);
+      },
       200,
     );
-
-    try {
-      const audioCtx = new AudioContext();
-      audioCtxRef.current = audioCtx;
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      audioCtx.createMediaStreamSource(stream).connect(analyser);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      setMeterActive(true);
-
-      const tick = () => {
-        analyser.getByteTimeDomainData(data);
-        let peak = 0;
-        for (let i = 0; i < data.length; i++) {
-          peak = Math.max(peak, Math.abs(data[i] - 128) / 128);
-        }
-        setLevel(peak);
-        rafRef.current = requestAnimationFrame(tick);
-      };
-      rafRef.current = requestAnimationFrame(tick);    } catch {
-      // A missing level meter is not worth failing a recording over.
-      setMeterActive(false);
-    }
-  }, [releaseStream]);
+  }, [live, liveEnabled, releaseStream, title]);
 
   const stopRecording = useCallback(() => {
     const recorder = recorderRef.current;
     releaseStream();
+    // Flush the last slice of audio before the tap is torn down.
+    void live.stop();
     if (recorder && recorder.state !== "inactive") {
       recorder.stop();
       recorderRef.current = null;
     } else {
       setPhase("idle");
     }
-  }, [releaseStream]);
+  }, [live, releaseStream]);
 
   const onPickFile = useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -350,6 +393,7 @@ export default function Recorder() {
 
   const discard = useCallback(() => {
     releaseStream();
+    live.reset();
     setCaptured(null);
     setMeetingId(null);
     setTranscript(null);
@@ -357,16 +401,20 @@ export default function Recorder() {
     setUploadProgress(null);
     setElapsed(0);
     setPhase("idle");
-  }, [releaseStream]);
+  }, [live, releaseStream]);
 
   /**
    * Two steps, in this order:
    *   1. Push the audio straight to blob storage from the browser, using a
    *      short-lived client token minted by /api/meetings/blob.
-   *   2. Tell the server the meeting exists, passing only the resulting URL.
+   *   2. Point the server at the resulting URL.
    *
    * The audio never enters a serverless function, so the 4.5 MB request body
    * limit that used to cap recordings at roughly four minutes no longer applies.
+   *
+   * A live session already has a meeting row, so step 2 finalises that row
+   * instead of creating a second one. Either way the meeting ends up in
+   * `uploaded`, and the pipeline from there is identical.
    */
   const submit = useCallback(async () => {
     if (!captured) return;
@@ -390,29 +438,44 @@ export default function Recorder() {
 
       setUploadProgress(null);
 
-      const response = await fetch("/api/meetings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          source: captured.source,
-          duration: captured.durationSeconds,
-          audio: {
-            url: result.url,
-            filename: file.name,
-            mime: contentType,
-            size: file.size,
-          },
-        }),
-      });
-      const payload = await response.json().catch(() => null);
+      const audio = {
+        url: result.url,
+        filename: file.name,
+        mime: contentType,
+        size: file.size,
+      };
 
-      if (!response.ok) {
-        setError(payload?.error ?? `Upload failed (HTTP ${response.status}).`);
-        setPhase("ready");
-        return;
+      if (live.active && live.liveId) {
+        await live.finalize({
+          id: live.liveId,
+          audioUrl: audio.url,
+          filename: audio.filename,
+          mime: audio.mime,
+          size: audio.size,
+          durationSeconds: captured.durationSeconds,
+        });
+        setMeetingId(live.liveId);
+      } else {
+        const response = await fetch("/api/meetings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            source: captured.source,
+            duration: captured.durationSeconds,
+            audio,
+          }),
+        });
+        const payload = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          setError(payload?.error ?? `Upload failed (HTTP ${response.status}).`);
+          setPhase("ready");
+          return;
+        }
+        setMeetingId(payload?.meeting?.id ?? null);
       }
-      setMeetingId(payload?.meeting?.id ?? null);
+
       setPhase("uploaded");
     } catch (err) {
       setUploadProgress(null);
@@ -423,7 +486,7 @@ export default function Recorder() {
       );
       setPhase("ready");
     }
-  }, [captured, title]);
+  }, [captured, live, title]);
 
   const transcribe = useCallback(async () => {
     if (!meetingId) return;
@@ -692,6 +755,74 @@ export default function Recorder() {
               />
             </div>
           )}
+
+          {live.active && (
+            <div className="live-grid">
+              <section className="live-panel" aria-label="Live captions">
+                <h3>
+                  Live captions
+                  <span className="muted small">
+                    {" "}
+                    {live.captions.length > 0
+                      ? `${formatDuration(live.audioSeconds)} transcribed`
+                      : "listening"}
+                  </span>
+                </h3>
+                {live.captions.length === 0 ? (
+                  <p className="muted small" style={{ margin: 0 }}>
+                    Waiting for speech&hellip;
+                  </p>
+                ) : (
+                  <div className="captions" ref={captionScrollRef}>
+                    {live.captions.map((caption) => (
+                      <p key={`${caption.start}-${caption.end}`}>
+                        <code>{formatDuration(caption.start)}</code> {caption.text}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="live-panel" aria-label="Live summary">
+                <h3>
+                  Live summary
+                  <span className="live-badge">provisional</span>
+                </h3>
+                {!live.summary ? (
+                  <p className="muted small" style={{ margin: 0 }}>
+                    First update after about 30 seconds of speech.
+                  </p>
+                ) : (
+                  <div key={live.summarySeq} className="live-summary-body">
+                    <p className="tldr" style={{ marginBottom: "0.6rem" }}>
+                      {live.summary.tldr}
+                    </p>
+                    {live.summary.topics.length > 0 && (
+                      <ul className="chips" style={{ marginBottom: "0.6rem" }}>
+                        {live.summary.topics.map((topic) => (
+                          <li key={topic}>{topic}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {live.summary.action_items.length > 0 && (
+                      <ul className="tasks">
+                        {live.summary.action_items.map((item) => (
+                          <li key={item.task}>
+                            <span>{item.task}</span>
+                            <span className="muted small">
+                              {item.owner ?? "unassigned"}
+                              {item.due ? ` · ${item.due}` : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </section>
+            </div>
+          )}
+
           <button type="button" className="btn btn-danger" onClick={stopRecording}>
             Stop recording
           </button>
@@ -722,6 +853,23 @@ export default function Recorder() {
               Upload a file
             </button>
           </div>
+
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={liveEnabled}
+              onChange={(event) => setLiveEnabled(event.target.checked)}
+            />
+            <span>
+              Show live captions and a running summary while recording
+              <span className="muted small">
+                {" "}
+                Extra transcription calls while the meeting runs. The final
+                summary is still produced from the complete recording.
+              </span>
+            </span>
+          </label>
+
           <p className="muted small">
             Upload accepts anything your browser can play as audio or video, so
             phone voice memos work too.

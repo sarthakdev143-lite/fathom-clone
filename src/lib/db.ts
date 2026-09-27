@@ -56,6 +56,18 @@ const MIGRATIONS: string[][] = [
   // from an evenly sampled subset. Nullable, so rows summarised before this
   // existed read as unknown rather than falsely claiming full coverage.
   [`ALTER TABLE meetings ADD COLUMN transcript_sampled INTEGER`],
+  // 5 -> 6: live mode. A meeting rows in as `live` and accumulates a partial
+  // transcript in the existing columns; the seq counters let a poller fetch only
+  // what changed since it last looked, instead of the whole transcript every
+  // couple of seconds.
+  [`ALTER TABLE meetings ADD COLUMN live_seq INTEGER NOT NULL DEFAULT 0`],
+  [`ALTER TABLE meetings ADD COLUMN live_summary_seq INTEGER NOT NULL DEFAULT 0`],
+  [`ALTER TABLE meetings ADD COLUMN live_audio_seconds REAL NOT NULL DEFAULT 0`],
+  // Records the audio position at the last live summary refresh, so the refresh
+  // throttle is derived from the database rather than from process memory. A
+  // module-level counter would reset on every serverless cold start and refresh
+  // far more often than intended.
+  [`ALTER TABLE meetings ADD COLUMN live_summary_audio_seconds REAL NOT NULL DEFAULT 0`],
 ];
 
 export const isRemoteDb = Boolean(process.env.TURSO_DATABASE_URL);
