@@ -24,8 +24,7 @@ The Turso pair is optional in development, which uses a local SQLite file.
 npm run dev
 ```
 
-Open http://localhost:3000. `npm run db:seed` adds four example meetings and
-makes live Groq calls.
+Then http://localhost:3000. `npm run db:seed` adds four example meetings.
 
 ## Deliberately not built
 
