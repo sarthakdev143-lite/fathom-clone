@@ -79,6 +79,7 @@ export function useLiveSession() {
   const chunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const inFlightRef = useRef(false);
+  const pollInFlightRef = useRef(false);
   const liveIdRef = useRef<string | null>(null);
   const seenSegmentsRef = useRef(0);
   const seenSummaryRef = useRef(0);
@@ -89,15 +90,27 @@ export function useLiveSession() {
     chunkTimerRef.current = null;
     pollTimerRef.current = null;
 
-    workletRef.current?.port.close();
-    workletRef.current?.disconnect();
+    // The AudioContext may already be closed if the page is tearing down, and
+    // disconnecting a node in a closed context throws. Teardown must never be
+    // the thing that breaks stopping a recording.
+    try {
+      workletRef.current?.port.close();
+      workletRef.current?.disconnect();
+    } catch {
+      // already torn down
+    }
     workletRef.current = null;
 
-    silentGainRef.current?.disconnect();
+    try {
+      silentGainRef.current?.disconnect();
+    } catch {
+      // already torn down
+    }
     silentGainRef.current = null;
 
     pcmRef.current = [];
     inFlightRef.current = false;
+    pollInFlightRef.current = false;
   }, []);
 
   useEffect(() => teardown, [teardown]);
@@ -152,6 +165,11 @@ export function useLiveSession() {
   const poll = useCallback(async () => {
     const id = liveIdRef.current;
     if (!id) return;
+    // A poll that is still waiting on the server must not be joined by the next
+    // interval tick, or requests queue behind each other and the captions
+    // arrive later and later.
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
 
     try {
       const url = `/api/live/${id}?segments=${seenSegmentsRef.current}&summary=${seenSummaryRef.current}`;
@@ -174,6 +192,8 @@ export function useLiveSession() {
       }
     } catch {
       // A missed poll is harmless; the next one catches up.
+    } finally {
+      pollInFlightRef.current = false;
     }
   }, []);
 

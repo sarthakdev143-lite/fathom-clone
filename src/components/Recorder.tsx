@@ -351,9 +351,11 @@ export default function Recorder() {
 
   const stopRecording = useCallback(() => {
     const recorder = recorderRef.current;
-    releaseStream();
-    // Flush the last slice of audio before the tap is torn down.
+    // Live mode is torn down first, while the AudioContext is still open:
+    // disconnecting a worklet in a closed context throws, which would abort
+    // stop() before the recorder is ever stopped and the UI would hang.
     void live.stop();
+    releaseStream();
     if (recorder && recorder.state !== "inactive") {
       recorder.stop();
       recorderRef.current = null;
@@ -706,17 +708,6 @@ export default function Recorder() {
             </p>
           )}
 
-          <label className="field">
-            <span>Title</span>
-            <input
-              type="text"
-              value={title}
-              placeholder="Untitled meeting"
-              maxLength={200}
-              onChange={(e) => setTitle(e.target.value)}
-            />
-          </label>
-
           <div className="row">
             <button
               type="button"
@@ -853,6 +844,17 @@ export default function Recorder() {
               Upload a file
             </button>
           </div>
+
+          <label className="field">
+            <span>Title</span>
+            <input
+              type="text"
+              value={title}
+              placeholder="Untitled meeting"
+              maxLength={200}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+          </label>
 
           <label className="check">
             <input

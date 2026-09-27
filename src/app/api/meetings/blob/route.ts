@@ -85,11 +85,9 @@ export async function POST(request: Request) {
         // Meeting audio should not be cached by any CDN in the path.
         cacheControlMaxAge: 0,
       }),
-      onUploadCompleted: async () => {
-        // Deliberately empty. Access is decided when the meeting row is created,
-        // so there is nothing to reconcile here. A real deployment would want
-        // to prune blobs that never became a meeting.
-      },
+      // No onUploadCompleted: the meeting row is only created once the client
+      // reports the URL, so there is nothing to reconcile server-side, and an
+      // empty callback makes Vercel warn about a missing callback URL.
     });
 
     return Response.json(response);

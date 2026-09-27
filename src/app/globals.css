@@ -618,17 +618,22 @@ code {
   margin-right: 0.2rem;
 }
 
-/* A brief wash when a new provisional summary lands, so the change is
-   noticeable without being loud. */
+/* A brief edge highlight when a new provisional summary lands, so the change
+   is noticeable without tinting the text the reader is trying to read. */
 .live-summary-body {
-  animation: live-flash 1.4s ease-out;
+  border-left: 2px solid transparent;
+  padding-left: 0.6rem;
+  margin-left: -0.75rem;
+  animation: live-flash 1.6s ease-out;
 }
 
 @keyframes live-flash {
   0% {
-    background-color: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-left-color: var(--accent);
+    background-color: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   100% {
+    border-left-color: transparent;
     background-color: transparent;
   }
 }
@@ -636,6 +641,7 @@ code {
 @media (prefers-reduced-motion: reduce) {
   .live-summary-body {
     animation: none;
+    border-left-color: var(--line);
   }
 }
 
