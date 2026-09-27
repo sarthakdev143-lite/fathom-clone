@@ -90,29 +90,49 @@ These are all outside the assigned steps 1–5 and were left alone on purpose.
 no longer constrains recording length, but Groq rejects audio over 25 MB, which
 caps a browser `webm/opus` recording at roughly 70 minutes. Anything larger
 uploads and then fails at transcription; the client warns above 25 MB rather than
-blocking, since the upload itself would succeed. Lifting it means chunking the
-audio and merging the segment offsets, which is a real piece of work.
+blocking, since the upload itself would succeed.
 
-**2. No retry affordance for a failed meeting.** The detail page is read-only, so
+**2. Long meetings are summarised from a sampled transcript.** Independent of
+audio size, Groq's on-demand tier allows 8,000 tokens per minute, which also caps
+any single request. A 32-minute transcript runs to roughly 35,000 characters, so
+it cannot be sent whole and the call fails outright with a 413 rather than
+degrading. Transcripts over 24,000 characters are therefore sampled — segments
+are dropped at even intervals across the whole conversation, never truncated at
+the start, so the summary still reflects the arc of the meeting and every
+timestamp it cites remains a real segment start. The consequence is that an
+action item sitting in a skipped gap can be missed. `transcript_sampled` records
+this on the meeting row (nullable: null means summarised before the field
+existed), the summarize API returns it as `transcriptCoverage`, and the detail
+page badges it so a reader knows the summary is narrower than the transcript.
+Lifting the ceiling means chunking the audio and merging the segment offsets.
+
+**3. No retry affordance for a failed meeting.** The detail page is read-only, so
 a meeting stuck in `failed` has to be re-driven from the record page. Both
 `transcribe` and `summarize` are safely re-runnable; only the UI affordance is
 missing.
 
-**3. No audio playback.** The audio is stored in blob storage, but there is no
+**4. No audio playback.** The audio is stored in blob storage, but there is no
 endpoint to stream it back. Out of scope for the five steps.
 
-**4. `npm run db:seed` calls the live Groq API** four times. It also deletes
+**5. `npm run db:seed` calls the live Groq API** four times. It also deletes
 existing `source = 'seed'` rows first, which makes it idempotent but not
 free.
 
-**5. The summariser is not retried at the parse layer.** Rate limits and 5xx are
+**6. The summariser is not retried at the parse layer.** Rate limits and 5xx are
 retried with backoff, and malformed JSON is parsed defensively, but if the model
 returns valid JSON of the wrong shape the meeting is marked `failed` and needs a
 manual re-run.
 
-**6. No authentication.** Anyone who can reach the app can list every meeting and
+**7. No authentication.** Anyone who can reach the app can list every meeting and
 open any meeting whose id they have. Blob URLs contain a random suffix, so the
 audio is not trivially guessable, but that is obscurity, not access control.
+
+**8. `vercel env add` will not overwrite an existing variable.** It errors
+instead, and a `--force` flag is not accepted by this CLI version. Rotating a key
+means `vercel env rm <NAME> production --yes` followed by a fresh `add`. Related:
+`vercel blob create-store --yes` **overwrites `.env.local`** with the project's
+Development-only variables, silently discarding any Production-only or local-only
+entries. Back the file up before running it.
 
 ## Things that will surprise you
 
