@@ -1,18 +1,7 @@
 import { NextResponse } from "next/server";
-import {
-  NotFoundError,
-  getSegments,
-  requireMeeting,
-  saveSummary,
-  setStatus,
-} from "@/lib/meetings";
-import { GroqError, chatCompletion } from "@/lib/groq";
-import {
-  SUMMARY_MODEL,
-  SYSTEM_PROMPT,
-  buildSummaryPrompt,
-  parseSummary,
-} from "@/lib/summary";
+import { NotFoundError, requireMeeting, setStatus } from "@/lib/meetings";
+import { GroqError } from "@/lib/groq";
+import { summarizeMeeting } from "@/lib/summarize";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,23 +11,16 @@ type Context = { params: Promise<{ id: string }> };
 export async function POST(_request: Request, context: Context) {
   const { id } = await context.params;
 
-  let title: string;
-  let transcript: string;
-  let segments: { start: number; end: number; text: string }[];
-
   try {
+    // Confirms the meeting exists and has a transcript, and distinguishes a
+    // 404/409 from an upstream failure.
     const meeting = await requireMeeting(id);
-
     if (!meeting.transcript || meeting.transcript.trim() === "") {
       return NextResponse.json(
         { error: "This meeting has no transcript yet. Transcribe it first." },
         { status: 409 },
       );
     }
-
-    title = meeting.title;
-    transcript = meeting.transcript;
-    segments = await getSegments(id);
   } catch (err) {
     if (err instanceof NotFoundError) {
       return NextResponse.json({ error: err.message }, { status: 404 });
@@ -46,32 +28,9 @@ export async function POST(_request: Request, context: Context) {
     throw err;
   }
 
-  await setStatus(id, "summarizing");
-
   try {
-    const completion = await chatCompletion({
-      model: SUMMARY_MODEL,
-      system: SYSTEM_PROMPT,
-      user: buildSummaryPrompt({ title, transcript, segments }),
-      temperature: 0.2,
-      maxTokens: 2000,
-      jsonMode: true,
-    });
-
-    const summary = parseSummary(completion.content);
-    await saveSummary(id, summary);
-
-    const meeting = await requireMeeting(id);
-
-    return NextResponse.json({
-      meeting,
-      summary,
-      usage: {
-        model: completion.model,
-        inputTokens: completion.inputTokens,
-        outputTokens: completion.outputTokens,
-      },
-    });
+    const summary = await summarizeMeeting(id);
+    return NextResponse.json({ meeting: await requireMeeting(id), summary });
   } catch (err) {
     const detail =
       err instanceof GroqError

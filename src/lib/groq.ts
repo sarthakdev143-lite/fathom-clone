@@ -60,6 +60,63 @@ function decodeErrorBody(body: string): string {
   return body.slice(0, 500);
 }
 
+const MAX_ATTEMPTS = 5;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Groq rate-limits aggressively (HTTP 429) and occasionally returns 5xx, so both
+ * are retried with exponential backoff and jitter. Anything else fails
+ * immediately, because retrying a 400 just wastes the quota.
+ *
+ * `buildInit` is a factory rather than a value so each attempt gets a fresh
+ * body: a consumed request body cannot be replayed.
+ */
+async function fetchGroq(
+  url: string,
+  buildInit: () => RequestInit,
+  label: string,
+): Promise<Response> {
+  let lastStatus = 0;
+  let lastBody = "";
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, buildInit());
+    } catch (err) {
+      // A connection-level failure is worth one more try.
+      if (attempt === MAX_ATTEMPTS) throw err;
+      await sleep(Math.min(8000, 500 * 2 ** attempt) + Math.random() * 300);
+      continue;
+    }
+
+    if (response.ok) return response;
+
+    lastStatus = response.status;
+    lastBody = await response.text();
+
+    const retryable = response.status === 429 || response.status >= 500;
+    if (!retryable || attempt === MAX_ATTEMPTS) break;
+
+    const retryAfter = Number(response.headers.get("retry-after"));
+    const waitMs =
+      Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(60_000, retryAfter * 1000)
+        : Math.min(20_000, 1000 * 2 ** (attempt - 1)) + Math.random() * 500;
+
+    await sleep(waitMs);
+  }
+
+  throw new GroqError(
+    `${label} failed (HTTP ${lastStatus}) after ${MAX_ATTEMPTS} attempts`,
+    lastStatus,
+    decodeErrorBody(lastBody),
+  );
+}
+
 export interface GroqTranscription {
   text: string;
   language: string | null;
@@ -124,21 +181,17 @@ export async function transcribeAudio(input: {
   form.append("response_format", "verbose_json");
   form.append("timestamp_granularities[]", "segment");
 
-  const response = await fetch(`${GROQ_BASE_URL}/audio/transcriptions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${requireGroqKey()}` },
-    body: form,
-  });
+  const response = await fetchGroq(
+    `${GROQ_BASE_URL}/audio/transcriptions`,
+    () => ({
+      method: "POST",
+      headers: { Authorization: `Bearer ${requireGroqKey()}` },
+      body: form,
+    }),
+    "Groq transcription",
+  );
 
   const body = await response.text();
-
-  if (!response.ok) {
-    throw new GroqError(
-      `Groq transcription failed (HTTP ${response.status})`,
-      response.status,
-      decodeErrorBody(body),
-    );
-  }
 
   let parsed: unknown;
   try {
@@ -183,33 +236,31 @@ export async function chatCompletion(input: {
   maxTokens?: number;
   jsonMode?: boolean;
 }): Promise<GroqChatResult> {
-  const response = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${requireGroqKey()}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: input.model,
-      messages: [
-        { role: "system", content: input.system },
-        { role: "user", content: input.user },
-      ],
-      temperature: input.temperature ?? 0.2,
-      max_tokens: input.maxTokens ?? 2000,
-      response_format: input.jsonMode ? { type: "json_object" } : undefined,
-    }),
+  const payload = JSON.stringify({
+    model: input.model,
+    messages: [
+      { role: "system", content: input.system },
+      { role: "user", content: input.user },
+    ],
+    temperature: input.temperature ?? 0.2,
+    max_tokens: input.maxTokens ?? 2000,
+    response_format: input.jsonMode ? { type: "json_object" } : undefined,
   });
 
-  const body = await response.text();
+  const response = await fetchGroq(
+    `${GROQ_BASE_URL}/chat/completions`,
+    () => ({
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${requireGroqKey()}`,
+        "Content-Type": "application/json",
+      },
+      body: payload,
+    }),
+    "Groq chat completion",
+  );
 
-  if (!response.ok) {
-    throw new GroqError(
-      `Groq chat completion failed (HTTP ${response.status})`,
-      response.status,
-      decodeErrorBody(body),
-    );
-  }
+  const body = await response.text();
 
   const parsed = JSON.parse(body) as {
     model?: string;
