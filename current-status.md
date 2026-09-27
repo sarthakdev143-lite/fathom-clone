@@ -21,6 +21,7 @@ tree is clean and green.
 | 3 | Summarization | One call, ~3s. 13/13 adversarial parser cases pass. |
 | 4 | Dashboard + detail | Both render, unknown id → 404. |
 | 5 | Seed | 4 meetings summarised through the real pipeline. 23/23 key moments land exactly on real segment starts. |
+| 6 | Live mode | Additive. Verified in production with real speech: captions at 6s intervals, provisional summary every ~35s of new audio, then the unchanged authoritative pipeline. |
 
 The pipeline was also run end to end **against the production deployment**:
 2.24 MB upload → 201, transcribe 3.9s, summarize 3.2s, detail page 200.
@@ -82,6 +83,35 @@ a 32-minute recording — 10.9 MB as `webm/opus`, 58.6 MB as uncompressed WAV �
 which uploaded successfully where the old path would have failed at roughly four
 minutes.
 
+## Live mode
+
+While a meeting is recording, captions and a running summary appear in the
+browser. The post-recording pipeline is untouched: when recording stops, the full
+audio is uploaded and the ordinary transcribe-then-summarize path runs as before,
+and its result overwrites the live preview.
+
+**Audio is tapped as raw PCM, not sliced from the recording.** An AudioWorklet
+copies samples out of the live stream and every 6 seconds they are encoded as a
+self-contained WAV and posted for transcription. The obvious alternative does not
+work: a WebM stream from MediaRecorder is not a valid media file until recording
+finishes, and Whisper rejects both a bare cluster and a header-prefixed cluster
+with `invalid_media_file`. That was tested before the feature was built, not
+assumed.
+
+**Transport is polling, not Server-Sent Events.** A meeting can run for half an
+hour, and a Vercel function is terminated once it exceeds its duration limit, so
+an SSE connection cannot outlive a recording. Polling every 2 seconds costs a few
+bytes when nothing has changed: the client sends how many segments it has and
+which summary version it last saw, and the server returns only the difference.
+`live_seq` and `live_summary_seq` on the meeting row are what make that cheap.
+
+**The live summary is deliberately provisional.** A reduced schema with no key
+moments, written as a progress update, refreshed at most every 35 seconds of new
+audio. The throttle position is stored in the database rather than in module
+memory, because a module-level counter resets on every serverless cold start and
+would refresh far more often than intended. A dropped provisional summary never
+fails the caption stream; the authoritative summary comes later regardless.
+
 ## Known limits, deliberately not addressed
 
 These are all outside the assigned steps 1–5 and were left alone on purpose.
@@ -111,23 +141,41 @@ a meeting stuck in `failed` has to be re-driven from the record page. Both
 `transcribe` and `summarize` are safely re-runnable; only the UI affordance is
 missing.
 
-**4. No audio playback.** The audio is stored in blob storage, but there is no
+**4. Abandoned live sessions linger.** Closing the tab mid-recording leaves the row
+in `live` forever, since nothing server-side knows the browser is gone. The
+dashboard labels such rows "Interrupted" after two minutes of silence rather
+than pretending they are still recording, but the audio and partial transcript are
+not cleaned up automatically.
+
+**5. Live captions can contain seam artifacts.** Each 6-second slice is
+transcribed independently, so a sentence spanning a boundary can be cut or
+repeated. This is exactly why the authoritative transcript re-transcribes the
+complete audio rather than reusing the live one, and why the live view is
+labelled provisional.
+
+**6. Live mode costs extra model calls.** A 30-minute meeting sends 300 chunk
+transcriptions plus roughly 50 summary refreshes. It is off by default only for
+uploads, not for recordings - recordings default to on, because a user who
+records a meeting usually wants the live view. The toggle is in the capture
+panel.
+
+**7. No audio playback.** The audio is stored in blob storage, but there is no
 endpoint to stream it back. Out of scope for the five steps.
 
-**5. `npm run db:seed` calls the live Groq API** four times. It also deletes
+**8. `npm run db:seed` calls the live Groq API** four times. It also deletes
 existing `source = 'seed'` rows first, which makes it idempotent but not
 free.
 
-**6. The summariser is not retried at the parse layer.** Rate limits and 5xx are
+**9. The summariser is not retried at the parse layer.** Rate limits and 5xx are
 retried with backoff, and malformed JSON is parsed defensively, but if the model
 returns valid JSON of the wrong shape the meeting is marked `failed` and needs a
 manual re-run.
 
-**7. No authentication.** Anyone who can reach the app can list every meeting and
+**10. No authentication.** Anyone who can reach the app can list every meeting and
 open any meeting whose id they have. Blob URLs contain a random suffix, so the
 audio is not trivially guessable, but that is obscurity, not access control.
 
-**8. `vercel env add` will not overwrite an existing variable.** It errors
+**11. `vercel env add` will not overwrite an existing variable.** It errors
 instead, and a `--force` flag is not accepted by this CLI version. Rotating a key
 means `vercel env rm <NAME> production --yes` followed by a fresh `add`. Related:
 `vercel blob create-store --yes` **overwrites `.env.local`** with the project's

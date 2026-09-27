@@ -3,9 +3,10 @@
 Record a meeting, get a transcript and a summary — live at
 **https://8x-assignment-fantom-clone.vercel.app**
 
-Records audio from the browser microphone or an uploaded file, transcribes it
-with Groq Whisper, and summarises it into a TL;DR, topics, decisions, action
-items and timestamped key moments, listed on a dashboard with a detail page each.
+Records audio from the browser microphone or an uploaded file, showing live
+captions and a running summary while recording. Transcribes with Groq Whisper,
+then summarises into a TL;DR, topics, decisions, action items and timestamped key
+moments, listed on a dashboard with a detail page each.
 
 ## Quickstart
 
