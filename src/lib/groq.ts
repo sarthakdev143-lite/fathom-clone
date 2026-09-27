@@ -81,8 +81,10 @@ async function fetchGroq(
 ): Promise<Response> {
   let lastStatus = 0;
   let lastBody = "";
+  let attempts = 0;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    attempts = attempt;
     let response: Response;
     try {
       response = await fetch(url, buildInit());
@@ -110,8 +112,13 @@ async function fetchGroq(
     await sleep(waitMs);
   }
 
+  // Report the attempts actually made. Claiming the full retry budget on a 400,
+  // which is never retried, sends whoever is debugging this looking in the
+  // wrong place.
   throw new GroqError(
-    `${label} failed (HTTP ${lastStatus}) after ${MAX_ATTEMPTS} attempts`,
+    `${label} failed (HTTP ${lastStatus}) after ${attempts} attempt${
+      attempts === 1 ? "" : "s"
+    }`,
     lastStatus,
     decodeErrorBody(lastBody),
   );

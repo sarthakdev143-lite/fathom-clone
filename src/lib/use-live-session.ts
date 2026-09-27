@@ -19,10 +19,39 @@ import { encodeWav } from "@/lib/wav";
  * `invalid_media_file`.
  */
 
-/** How much audio to accumulate before sending a slice. */
+/** Baseline audio per slice when everything is healthy. */
 const CHUNK_SECONDS = 6;
 /** How often to ask the server for new captions and a new summary. */
 const POLL_MS = 2000;
+
+/**
+ * Rate-limit backoff for the chunk cadence. A 429 or 5xx from Groq doubles the
+ * delay up to a ceiling, and any successful slice resets it. This only governs
+ * how often the *live preview* is refreshed; the authoritative transcribe and
+ * summary after recording stops are separate requests with their own retry
+ * policy and are deliberately unaffected.
+ */
+const MAX_CHUNK_INTERVAL_MS = 60_000;
+
+/**
+ * Hard cap on how much audio one slice may carry, regardless of how long the
+ * client slept. This is load-bearing: at the 60s backoff ceiling a slice would
+ * otherwise hold a full minute of 48 kHz 16-bit audio, which is about 5.8 MB and
+ * is rejected by the server's 4 MB chunk limit. Every post-backoff request would
+ * then fail, so the live captions would die precisely when the safety net was
+ * supposed to help. The buffer is trimmed to the most recent
+ * MAX_SLICE_SECONDS rather than the oldest, because for a live view recent
+ * context matters more, and the dropped span is visible as a gap in the
+ * timestamps.
+ */
+const MAX_SLICE_SECONDS = 20;
+
+/**
+ * Live updates stop after this much continuous recording. The recording itself
+ * and the eventual authoritative transcript are unaffected - this only caps the
+ * number of extra model calls a long meeting incurs.
+ */
+const LIVE_CEILING_SECONDS = 20 * 60;
 
 const WORKLET_SOURCE = `
 class PcmTap extends AudioWorkletProcessor {
@@ -67,6 +96,8 @@ export function useLiveSession() {
   const [audioSeconds, setAudioSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [summarySeq, setSummarySeq] = useState(0);
+  /** Set once the ceiling is hit, so the UI can say why updates stopped. */
+  const [paused, setPaused] = useState(false);
 
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const silentGainRef = useRef<GainNode | null>(null);
@@ -76,18 +107,60 @@ export function useLiveSession() {
   const sentSecondsRef = useRef(0);
   /** Total recorded, which is ahead of what has been transcribed. */
   const recordedSecondsRef = useRef(0);
-  const chunkTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Bumped to cancel the chunk loop; see runChunkLoop. */
+  const generationRef = useRef(0);
+  /** Pending delay resolvers, so teardown can wake the loop immediately. */
+  const sleepersRef = useRef<(() => void)[]>([]);
   const inFlightRef = useRef(false);
   const pollInFlightRef = useRef(false);
   const liveIdRef = useRef<string | null>(null);
   const seenSegmentsRef = useRef(0);
   const seenSummaryRef = useRef(0);
+  /** Current chunk cadence, which backs off on rate limits. */
+  const chunkIntervalRef = useRef(CHUNK_SECONDS * 1000);
+  const pausedRef = useRef(false);
+
+  const clearChunkTimer = useCallback(() => {
+    // Cancels the loop wherever it is, including mid-delay.
+    generationRef.current += 1;
+    if (chunkTimerRef.current) clearTimeout(chunkTimerRef.current);
+    chunkTimerRef.current = null;
+    const pending = sleepersRef.current;
+    sleepersRef.current = [];
+    for (const wake of pending) wake();
+  }, []);
+
+  /**
+   * Doubles the chunk cadence up to the ceiling. Reported rather than surfaced
+   * as an error: a rate limit is a condition to ride out, not something the
+   * person recording needs interrupting them over.
+   */
+  const backOff = useCallback(
+    (reason: string) => {
+      const previous = chunkIntervalRef.current;
+      chunkIntervalRef.current = Math.min(MAX_CHUNK_INTERVAL_MS, previous * 2);
+      console.info(
+        `[live] backing off chunk cadence ${previous}ms -> ${chunkIntervalRef.current}ms (${reason})`,
+      );
+    },
+    [],
+  );
+
+  const resetCadence = useCallback(() => {
+    // Only report an actual change, otherwise every healthy slice logs.
+    if (chunkIntervalRef.current === CHUNK_SECONDS * 1000) return;
+    const previous = chunkIntervalRef.current;
+    chunkIntervalRef.current = CHUNK_SECONDS * 1000;
+    console.info(
+      `[live] upstream recovered, chunk cadence ${previous}ms -> ${CHUNK_SECONDS * 1000}ms`,
+    );
+  }, []);
 
   const teardown = useCallback(() => {
-    if (chunkTimerRef.current) clearInterval(chunkTimerRef.current);
+    clearChunkTimer();
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    chunkTimerRef.current = null;
     pollTimerRef.current = null;
 
     // The AudioContext may already be closed if the page is tearing down, and
@@ -111,13 +184,14 @@ export function useLiveSession() {
     pcmRef.current = [];
     inFlightRef.current = false;
     pollInFlightRef.current = false;
-  }, []);
+  }, [clearChunkTimer]);
 
   useEffect(() => teardown, [teardown]);
 
   const sendChunk = useCallback(async () => {
     const id = liveIdRef.current;
     if (!id || inFlightRef.current) return;
+    if (pausedRef.current) return;
     if (pcmRef.current.length === 0) return;
 
     // Take everything buffered so far, then clear. Samples arriving during the
@@ -135,32 +209,110 @@ export function useLiveSession() {
       offset += buf.length;
     }
 
-    const sliceSeconds = flat.length / sampleRateRef.current;
-    const startAt = sentSecondsRef.current;
+    const bufferedSeconds = flat.length / sampleRateRef.current;
+    const sliceStart = sentSecondsRef.current;
+
+    // Trim an over-long buffer to its tail, so a request can never grow past the
+    // server's limit no matter how long the cadence was backed off for.
+    const maxSamples = Math.floor(MAX_SLICE_SECONDS * sampleRateRef.current);
+    const slice =
+      flat.length > maxSamples ? flat.subarray(flat.length - maxSamples) : flat;
+
+    const droppedSeconds = (flat.length - slice.length) / sampleRateRef.current;
+    const sliceSeconds = slice.length / sampleRateRef.current;
+    const startAt = sliceStart + droppedSeconds;
     const audioTotal = recordedSecondsRef.current;
 
-    const blob = encodeWav(flat, sampleRateRef.current);
+    // Consume the whole buffer whatever happens, so a dropped span is not
+    // retried forever and later slices keep correct offsets.
+    sentSecondsRef.current = sliceStart + bufferedSeconds;
+
+    if (droppedSeconds > 0) {
+      console.info(
+        `[live] slice trimmed to ${MAX_SLICE_SECONDS}s, dropped ${droppedSeconds.toFixed(1)}s of backlog`,
+      );
+    }
+
+    const blob = encodeWav(slice, sampleRateRef.current);
     const form = new FormData();
     form.append("audio", blob, "chunk.wav");
     form.append("offset", String(startAt));
-    form.append("audioTotal", String(Math.max(audioTotal, startAt + sliceSeconds)));
+    form.append("audioTotal", String(Math.max(audioTotal, sentSecondsRef.current)));
 
     inFlightRef.current = true;
     try {
       const response = await fetch(`/api/live/${id}/chunk`, { method: "POST", body: form });
+      const payload = await response.json().catch(() => null);
+
       if (response.ok) {
-        // Advance past this slice regardless of what came back, so a slice that
-        // fails is skipped rather than resent forever.
-        sentSecondsRef.current = startAt + sliceSeconds;
-      } else {
-        pcmRef.current.unshift(...pending);
+        // A slice is only ever a preview. If the summary refresh hit a rate
+        // limit the captions are still fine, but the account is clearly at its
+        // ceiling, so the whole live cadence slows down.
+        if (payload?.rateLimited) {
+          backOff("summary refresh rate limited");
+        } else {
+          resetCadence();
+        }
+        return;
       }
-    } catch {
-      pcmRef.current.unshift(...pending);
+
+      if (payload?.rateLimited) {
+        backOff(`HTTP ${response.status} (${payload.upstreamStatus ?? "?"})`);
+      } else {
+        console.info(
+          `[live] slice rejected, not retrying: ${payload?.error ?? response.status}`,
+        );
+      }
+      // The audio is intentionally dropped rather than re-queued. Re-queueing
+      // would grow the buffer on every failure until the slice exceeded the
+      // request limit and live mode failed permanently. A short gap in the
+      // captions is the better trade, and the authoritative transcript
+      // re-transcribes the complete recording afterwards regardless.
+    } catch (err) {
+      console.info(
+        `[live] slice request failed, not retrying: ${
+          err instanceof Error ? err.message : "unknown"
+        }`,
+      );
     } finally {
       inFlightRef.current = false;
     }
+  }, [backOff, resetCadence]);
+
+  /** Resolvable delay that teardown can cut short. */
+  const waitFor = useCallback((ms: number) => {
+    return new Promise<void>((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        sleepersRef.current = sleepersRef.current.filter((f) => f !== finish);
+        resolve();
+      }, ms);
+      sleepersRef.current.push(finish);
+    });
   }, []);
+
+  /**
+   * Sends one slice per cadence until stopped, backing off as needed.
+   *
+   * A generation counter rather than recursion: a self-referencing
+   * useCallback is not valid, and bumping the generation is what makes teardown
+   * cancel a loop that is currently waiting on a delay. Any pending sleep is
+   * woken immediately so nothing is left running after a stop.
+   */
+  const runChunkLoop = useCallback(
+    async (generation: number) => {
+      while (generationRef.current === generation && liveIdRef.current) {
+        await waitFor(chunkIntervalRef.current);
+        if (generationRef.current !== generation) return;
+        if (pausedRef.current) return;
+        await sendChunk();
+      }
+    },
+    [sendChunk, waitFor],
+  );
 
   const poll = useCallback(async () => {
     const id = liveIdRef.current;
@@ -207,10 +359,13 @@ export function useLiveSession() {
       setCaptions([]);
       setSummary(null);
       setSummarySeq(0);
+      setPaused(false);
+      pausedRef.current = false;
       seenSegmentsRef.current = 0;
       seenSummaryRef.current = 0;
       sentSecondsRef.current = 0;
       recordedSecondsRef.current = 0;
+      chunkIntervalRef.current = CHUNK_SECONDS * 1000;
 
       const created = await fetch("/api/live", {
         method: "POST",
@@ -262,25 +417,49 @@ export function useLiveSession() {
         );
       }
 
-      chunkTimerRef.current = setInterval(() => void sendChunk(), CHUNK_SECONDS * 1000);
       pollTimerRef.current = setInterval(() => void poll(), POLL_MS);
+      void runChunkLoop(generationRef.current);
       return true;
     },
-    [poll, sendChunk],
+    [poll, runChunkLoop],
   );
+  /**
+   * Tracks how much audio has been recorded, and enforces the live ceiling.
+   *
+   * Reaching the ceiling stops the live timers and nothing else: the
+   * MediaRecorder is untouched, so the recording continues and the full audio is
+   * still uploaded and transcribed when it stops. Only the preview goes quiet.
+   */
+  const tick = useCallback(
+    (elapsedSeconds: number) => {
+      recordedSecondsRef.current = elapsedSeconds;
+      if (pausedRef.current || elapsedSeconds < LIVE_CEILING_SECONDS) return;
 
-  /** Tracks wall-clock audio so the server knows how far along the meeting is. */
-  const tick = useCallback((elapsedSeconds: number) => {
-    recordedSecondsRef.current = elapsedSeconds;
-  }, []);
+      pausedRef.current = true;
+      setPaused(true);
+      clearChunkTimer();
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+      console.info(
+        `[live] ceiling reached at ${Math.round(elapsedSeconds)}s, live updates paused`,
+      );
+    },
+    [clearChunkTimer],
+  );
 
   /**
    * Stops timers and the audio tap, flushing whatever is buffered. The caller
    * then uploads the full recording and finalises.
+   *
+   * Nothing here talks to the transcription or summarization paths that produce
+   * the authoritative result, so a live failure or an active backoff cannot
+   * affect them.
    */
   const stop = useCallback(async () => {
     teardown();
-    await sendChunk();
+    // No final flush once the ceiling has stopped live updates, so stopping a
+    // long meeting does not resurrect the path that was deliberately disabled.
+    if (!pausedRef.current) await sendChunk();
   }, [sendChunk, teardown]);
 
   const reset = useCallback(() => {
@@ -292,10 +471,13 @@ export function useLiveSession() {
     setSummarySeq(0);
     setAudioSeconds(0);
     setError(null);
+    setPaused(false);
+    pausedRef.current = false;
     seenSegmentsRef.current = 0;
     seenSummaryRef.current = 0;
     sentSecondsRef.current = 0;
     recordedSecondsRef.current = 0;
+    chunkIntervalRef.current = CHUNK_SECONDS * 1000;
   }, [teardown]);
 
   /** Finalises a live session into the normal pipeline. */
@@ -334,6 +516,8 @@ export function useLiveSession() {
     summarySeq,
     audioSeconds,
     error: error,
+    /** True once the live ceiling stopped updates for a long recording. */
+    paused,
     start,
     tick,
     stop,

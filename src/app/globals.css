@@ -599,6 +599,17 @@ code {
   font-weight: 500;
 }
 
+.live-paused {
+  margin: 0 0 1.25rem;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--muted) 8%, transparent);
+  color: var(--muted);
+  font-size: 0.875rem;
+  text-align: left;
+}
+
 .captions {
   max-height: 13rem;
   overflow-y: auto;

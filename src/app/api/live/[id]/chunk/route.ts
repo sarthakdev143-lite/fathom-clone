@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasGroqKey, isDbConfigured } from "@/lib/config";
-import { transcribeAudio } from "@/lib/groq";
+import { transcribeAudio, GroqError } from "@/lib/groq";
 import { appendLiveSegments } from "@/lib/live";
 import { refreshLiveSummaryIfDue } from "@/lib/live-summary";
 import type { TranscriptSegment } from "@/lib/meetings";
@@ -73,12 +73,17 @@ export async function POST(request: Request, context: Context) {
       mimeType: "audio/wav",
     });
   } catch (err) {
-    // A failed slice is recoverable: the client keeps sending, and the gap is
-    // visible in the final transcript. Reporting it here would only make the
-    // client retry a chunk that will keep failing.
+    // The upstream status is preserved deliberately. A 429 or 5xx tells the
+    // client to back its cadence off, while a 400 means this slice is
+    // unacceptable and retrying it will never help. Collapsing both into one
+    // 502 would make the client either hammer a rate limit or give up on a
+    // transient error.
+    const status = err instanceof GroqError ? err.status : 502;
     return NextResponse.json(
       {
         error: err instanceof Error ? err.message : "Chunk transcription failed.",
+        upstreamStatus: status,
+        rateLimited: status === 429 || status >= 500,
         recoverable: true,
       },
       { status: 502 },
@@ -102,7 +107,7 @@ export async function POST(request: Request, context: Context) {
   }
 
   let summaryRefreshed = false;
-  let summaryNote: string | undefined;
+  let summaryRateLimited = false;
   if (segments.length > 0) {
     try {
       const outcome = await refreshLiveSummaryIfDue({
@@ -110,10 +115,12 @@ export async function POST(request: Request, context: Context) {
         audioSeconds: totalSeconds,
       });
       summaryRefreshed = outcome.refreshed;
-      summaryNote = outcome.reason;
-    } catch {
+    } catch (err) {
       // A provisional summary is a nicety; losing one must not lose captions.
-      summaryNote = "summary refresh failed";
+      // Rate limiting is still reported so the client can slow its cadence,
+      // since a summary call failing on 429 means the account is at its limit.
+      summaryRateLimited =
+        err instanceof GroqError && (err.status === 429 || err.status >= 500);
     }
   }
 
@@ -121,7 +128,7 @@ export async function POST(request: Request, context: Context) {
     segments,
     totalSeconds,
     summaryRefreshed,
-    ...(summaryNote ? { note: summaryNote } : {}),
+    rateLimited: summaryRateLimited,
   });
 }
 

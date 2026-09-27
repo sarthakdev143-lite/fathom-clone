@@ -747,7 +747,15 @@ export default function Recorder() {
             </div>
           )}
 
-          {live.active && (
+          {live.active && live.paused && (
+            <p className="live-paused" role="status">
+              Live updates paused for long recordings. Recording is still
+              running, and the full transcript and summary are produced when you
+              stop.
+            </p>
+          )}
+
+          {live.active && !live.paused && (
             <div className="live-grid">
               <section className="live-panel" aria-label="Live captions">
                 <h3>
@@ -810,9 +818,9 @@ export default function Recorder() {
                     )}
                   </div>
                 )}
-              </section>
-            </div>
-          )}
+                </section>
+              </div>
+            )}
 
           <button type="button" className="btn btn-danger" onClick={stopRecording}>
             Stop recording
