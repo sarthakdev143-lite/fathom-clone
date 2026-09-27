@@ -3,7 +3,7 @@
 A Fathom AI clone. Next.js App Router, API routes as the backend, SQLite for
 storage. Live at **https://8x-assignment-fantom-clone.vercel.app**.
 
-Last updated: 2026-09-27.
+Last updated: 2026-09-27 (audio upload moved to Vercel Blob).
 
 ## Short answer: nothing is left unfinished
 
@@ -16,7 +16,7 @@ tree is clean and green.
 
 | # | Step | Verification |
 |---|------|--------------|
-| 1 | Audio capture | Real Chromium with a synthetic mic: 4s recording → 58 KB webm → 66 KB body reached the server. Rejection paths return 400 / 413 / 415. |
+| 1 | Audio capture | Real Chromium with a synthetic mic: 4s recording → 58 KB webm → 66 KB body reached the server. Rejection paths return 400 / 413 / 415. 32-minute and 58.6 MB files upload directly to blob storage. |
 | 2 | Transcription | Real speech audio → 53s, 630 chars, 14 timestamped segments, 3.9s via `whisper-large-v3-turbo`. |
 | 3 | Summarization | One call, ~3s. 13/13 adversarial parser cases pass. |
 | 4 | Dashboard + detail | Both render, unknown id → 404. |
@@ -33,10 +33,15 @@ wire protocol, so only the URL changes: `file:./data/app.db` in development,
 because the serverless filesystem is read-only and does not persist between
 invocations.
 
-**Audio bytes are retained as a BLOB.** The first version of the upload discarded
-them, which left Whisper with nothing to transcribe. Keeping them makes
-transcription an independently retryable step rather than something welded onto
-the upload request.
+**Audio is uploaded by the browser straight to Vercel Blob.** The browser asks
+`/api/meetings/blob` for a short-lived client token, PUTs the file directly to
+storage, then posts only the resulting URL and metadata to `/api/meetings`. The
+audio never passes through a serverless function, so the 4.5 MB function request
+body limit does not apply to it. Files over 8 MB switch to a multipart upload so
+individual parts retry independently. The transcribe route fetches the audio back
+from the URL when it needs to. `audio_url` is validated against the Vercel Blob
+host pattern before it is stored, because the server fetches it and an unchecked
+URL would be a server-side request forgery vector.
 
 **Schema changes are forward-only migrations** recorded in `_migrations`
 (`src/lib/db.ts`). The initial `CREATE TABLE` is the version 0 shape and is
@@ -52,6 +57,7 @@ a terminal state carrying `status_error`. Each stage can be re-run on its own.
 |----------|--------------|-------|
 | `TURSO_DATABASE_URL` | any persistence | Falls back to a local SQLite file in development. Required on Vercel. |
 | `TURSO_AUTH_TOKEN` | remote database | |
+| `BLOB_READ_WRITE_TOKEN` | audio upload | Vercel Blob store token. `vercel blob create-store --access public --yes` provisions it. |
 | `GROQ_API_KEY` | steps 2 and 3 | |
 | `SUMMARY_MODEL` | optional | Defaults to `openai/gpt-oss-120b`. |
 
@@ -67,23 +73,33 @@ npm run db:seed    # re-seeds; makes live Groq calls, so it costs quota
 npm run check      # typecheck + lint + build
 ```
 
+## Fixed
+
+**Vercel's 4.5 MB request-body cap — fixed.** Audio no longer travels through a
+function: the browser uploads it directly to Vercel Blob with a client token
+minted by `/api/meetings/blob`, and posts only the resulting URL. Verified with
+a 32-minute recording — 10.9 MB as `webm/opus`, 58.6 MB as uncompressed WAV —
+which uploaded successfully where the old path would have failed at roughly four
+minutes.
+
 ## Known limits, deliberately not addressed
 
 These are all outside the assigned steps 1–5 and were left alone on purpose.
 
-**1. Vercel's 4.5 MB request-body cap.** Roughly 20 minutes of Opus audio. Longer
-recordings fail with a platform error rather than the app's own validation
-message, because the platform rejects the request before the route handler runs.
-The code cap is 25 MB (`src/app/api/meetings/route.ts:12`). The fix is chunked
-upload, which changes both the client and the API.
+**1. Groq's 25 MB transcription cap is now the binding limit.** The upload path
+no longer constrains recording length, but Groq rejects audio over 25 MB, which
+caps a browser `webm/opus` recording at roughly 70 minutes. Anything larger
+uploads and then fails at transcription; the client warns above 25 MB rather than
+blocking, since the upload itself would succeed. Lifting it means chunking the
+audio and merging the segment offsets, which is a real piece of work.
 
 **2. No retry affordance for a failed meeting.** The detail page is read-only, so
 a meeting stuck in `failed` has to be re-driven from the record page. Both
 `transcribe` and `summarize` are safely re-runnable; only the UI affordance is
 missing.
 
-**3. No audio playback.** Audio is stored and retained, but there is no endpoint
-to stream it back. Out of scope for the five steps.
+**3. No audio playback.** The audio is stored in blob storage, but there is no
+endpoint to stream it back. Out of scope for the five steps.
 
 **4. `npm run db:seed` calls the live Groq API** four times. It also deletes
 existing `source = 'seed'` rows first, which makes it idempotent but not
@@ -93,6 +109,10 @@ free.
 retried with backoff, and malformed JSON is parsed defensively, but if the model
 returns valid JSON of the wrong shape the meeting is marked `failed` and needs a
 manual re-run.
+
+**6. No authentication.** Anyone who can reach the app can list every meeting and
+open any meeting whose id they have. Blob URLs contain a random suffix, so the
+audio is not trivially guessable, but that is obscurity, not access control.
 
 ## Things that will surprise you
 
