@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db";
+import type { MeetingSummary } from "./summary";
 import type { Meeting, MeetingSource, MeetingStatus } from "./types";
 
 export interface TranscriptSegment {
@@ -130,6 +131,51 @@ export async function saveTranscript(
       new Date().toISOString(),
       id,
     ],
+  });
+}
+
+export async function getSegments(id: string): Promise<TranscriptSegment[]> {
+  const client = await db();
+  const result = await client.execute({
+    sql: `SELECT transcript_segments_json FROM meetings WHERE id = ?`,
+    args: [id],
+  });
+
+  const raw: unknown = result.rows[0]?.transcript_segments_json;
+  if (typeof raw !== "string" || raw.length === 0) return [];
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (segment): segment is TranscriptSegment =>
+          typeof segment === "object" &&
+          segment !== null &&
+          typeof (segment as TranscriptSegment).start === "number" &&
+          typeof (segment as TranscriptSegment).end === "number" &&
+          typeof (segment as TranscriptSegment).text === "string",
+      )
+      .map((segment) => ({
+        start: segment.start,
+        end: segment.end,
+        text: segment.text,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+export async function saveSummary(
+  id: string,
+  summary: MeetingSummary,
+): Promise<void> {
+  const client = await db();
+  await client.execute({
+    sql: `UPDATE meetings
+          SET summary_json = ?, status = 'ready', status_error = NULL, updated_at = ?
+          WHERE id = ?`,
+    args: [JSON.stringify(summary), new Date().toISOString(), id],
   });
 }
 

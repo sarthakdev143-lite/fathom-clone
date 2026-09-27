@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { MeetingSummary } from "@/lib/summary";
 
 /**
  * Step 1: audio capture.
@@ -30,7 +31,9 @@ type Phase =
   | "uploading"
   | "uploaded"
   | "transcribing"
-  | "transcribed";
+  | "transcribed"
+  | "summarizing"
+  | "ready-to-view";
 
 interface CapturedFile {
   file: File;
@@ -115,6 +118,7 @@ export default function Recorder() {
     language: string | null;
     duration: number | null;
   } | null>(null);
+  const [summary, setSummary] = useState<MeetingSummary | null>(null);
   const [title, setTitle] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
@@ -306,6 +310,7 @@ export default function Recorder() {
     setCaptured(null);
     setMeetingId(null);
     setTranscript(null);
+    setSummary(null);
     setElapsed(0);
     setPhase("idle");
   }, [releaseStream]);
@@ -331,6 +336,30 @@ export default function Recorder() {
     } catch {
       setError("Could not reach the transcription service. Retry in a moment.");
       setPhase("uploaded");
+    }
+  }, [meetingId]);
+
+  const summarize = useCallback(async () => {
+    if (!meetingId) return;
+    setError(null);
+    setPhase("summarizing");
+
+    try {
+      const response = await fetch(`/api/meetings/${meetingId}/summarize`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setError(payload?.error ?? `Summarization failed (HTTP ${response.status}).`);
+        setPhase("transcribed");
+        return;
+      }
+      setSummary(payload?.summary ?? null);
+      setPhase("ready-to-view");
+    } catch {
+      setError("Could not reach the summarizer. Retry in a moment.");
+      setPhase("transcribed");
     }
   }, [meetingId]);
 
@@ -367,11 +396,76 @@ export default function Recorder() {
 
   return (
     <div className="recorder">
-      {phase === "uploaded" ||
-      phase === "transcribing" ||
-      phase === "transcribed" ? (
+      {phase === "ready-to-view" && summary ? (
         <div className="panel panel-ok">
-          {phase === "transcribed" ? (
+          <h2>Summary ready</h2>
+          <p className="tldr">{summary.tldr}</p>
+
+          {summary.topics.length > 0 && (
+            <div className="block">
+              <h3>Topics</h3>
+              <ul className="chips">
+                {summary.topics.map((topic) => (
+                  <li key={topic}>{topic}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {summary.decisions.length > 0 && (
+            <div className="block">
+              <h3>Decisions</h3>
+              <ul>
+                {summary.decisions.map((decision) => (
+                  <li key={decision}>{decision}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {summary.action_items.length > 0 && (
+            <div className="block">
+              <h3>Action items</h3>
+              <ul className="tasks">
+                {summary.action_items.map((item) => (
+                  <li key={item.task}>
+                    <span>{item.task}</span>
+                    <span className="muted small">
+                      {item.owner ?? "unassigned"}
+                      {item.due ? ` · ${item.due}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {summary.key_moments.length > 0 && (
+            <div className="block">
+              <h3>Key moments</h3>
+              <ul className="moments">
+                {summary.key_moments.map((moment) => (
+                  <li key={moment.timestamp}>
+                    <code>{formatDuration(moment.timestamp)}</code>
+                    <span>{moment.label}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="row">
+            <button type="button" className="btn" onClick={discard}>
+              Start another meeting
+            </button>
+          </div>
+        </div>
+      ) : phase === "uploaded" ||
+        phase === "transcribing" ||
+        phase === "transcribed" ||
+        phase === "summarizing" ? (
+        <div className="panel panel-ok">
+          {phase === "transcribed" || phase === "summarizing" ? (
             <>
               <h2>Transcript ready</h2>
               <dl className="meta">
@@ -397,8 +491,16 @@ export default function Recorder() {
                 </div>
               </dl>
               <div className="row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={phase === "summarizing"}
+                  onClick={summarize}
+                >
+                  {phase === "summarizing" ? "Summarizing…" : "Summarize"}
+                </button>
                 <button type="button" className="btn" onClick={discard}>
-                  Start another meeting
+                  Record another
                 </button>
               </div>
             </>

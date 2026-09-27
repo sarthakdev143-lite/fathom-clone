@@ -251,3 +251,82 @@ code {
   font-size: 0.85em;
   overflow-wrap: anywhere;
 }
+
+.tldr {
+  font-size: 1.05rem;
+  margin: 0 0 1.25rem;
+}
+
+.block {
+  margin: 0 0 1.25rem;
+}
+
+.block h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.block ul {
+  margin: 0;
+  padding-left: 1.15rem;
+}
+
+.chips {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.chips li {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.tasks {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.tasks li {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: baseline;
+  border-left: 2px solid var(--accent);
+  padding-left: 0.75rem;
+}
+
+.tasks .muted {
+  flex: none;
+  white-space: nowrap;
+}
+
+.moments {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.moments li {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.moments code {
+  flex: none;
+  min-width: 3.2rem;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
