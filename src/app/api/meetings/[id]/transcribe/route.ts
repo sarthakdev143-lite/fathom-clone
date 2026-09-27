@@ -1,0 +1,91 @@
+import { NextResponse } from "next/server";
+import {
+  NotFoundError,
+  getAudioBlob,
+  requireMeeting,
+  saveTranscript,
+  setStatus,
+} from "@/lib/meetings";
+import { GroqError, looksLikeSpeech, transcribeAudio } from "@/lib/groq";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type Context = { params: Promise<{ id: string }> };
+
+export async function POST(_request: Request, context: Context) {
+  const { id } = await context.params;
+
+  let filename: string;
+  let mimeType: string | null;
+  let audio: Uint8Array;
+
+  try {
+    const meeting = await requireMeeting(id);
+    const blob = await getAudioBlob(id);
+
+    if (!blob) {
+      return NextResponse.json(
+        { error: "This meeting has no stored audio to transcribe." },
+        { status: 409 },
+      );
+    }
+
+    filename = meeting.audio_filename || "audio.webm";
+    mimeType = meeting.audio_mime;
+    audio = blob;
+  } catch (err) {
+    if (err instanceof NotFoundError) {
+      return NextResponse.json({ error: err.message }, { status: 404 });
+    }
+    throw err;
+  }
+
+  await setStatus(id, "transcribing");
+
+  try {
+    const result = await transcribeAudio({ audio, filename, mimeType });
+
+    if (!looksLikeSpeech(result.text, result.duration)) {
+      // Whisper hallucinated filler for non-speech audio. Recording this as a
+      // success would let step 3 summarise audio that contains no meeting.
+      await setStatus(
+        id,
+        "failed",
+        "No speech was detected in this audio.",
+      );
+      return NextResponse.json(
+        { error: "No speech was detected in this audio." },
+        { status: 422 },
+      );
+    }
+
+    await saveTranscript(id, {
+      text: result.text,
+      language: result.language,
+      duration: result.duration,
+      segments: result.segments,
+    });
+
+    const meeting = await requireMeeting(id);
+    return NextResponse.json({
+      meeting,
+      transcript: {
+        characters: result.text.length,
+        segments: result.segments.length,
+        language: result.language,
+        duration: result.duration,
+      },
+    });
+  } catch (err) {
+    const detail =
+      err instanceof GroqError
+        ? `${err.message}: ${err.detail}`
+        : err instanceof Error
+          ? err.message
+          : "Unknown transcription error.";
+
+    await setStatus(id, "failed", detail);
+    return NextResponse.json({ error: detail }, { status: 502 });
+  }
+}

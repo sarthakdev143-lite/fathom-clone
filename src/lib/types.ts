@@ -21,6 +21,7 @@ export interface Meeting {
   transcript: string | null;
   transcript_language: string | null;
   summary_json: string | null;
+  transcript_segments_json?: string | null;
   created_at: string;
   updated_at: string;
 }

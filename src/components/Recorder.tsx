@@ -23,7 +23,14 @@ const MIME_CANDIDATES = [
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
-type Phase = "idle" | "recording" | "ready" | "uploading" | "uploaded";
+type Phase =
+  | "idle"
+  | "recording"
+  | "ready"
+  | "uploading"
+  | "uploaded"
+  | "transcribing"
+  | "transcribed";
 
 interface CapturedFile {
   file: File;
@@ -102,6 +109,12 @@ export default function Recorder() {
   const [error, setError] = useState<string | null>(null);
   const [captured, setCaptured] = useState<CapturedFile | null>(null);
   const [meetingId, setMeetingId] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<{
+    characters: number;
+    segments: number;
+    language: string | null;
+    duration: number | null;
+  } | null>(null);
   const [title, setTitle] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [level, setLevel] = useState(0);
@@ -292,9 +305,34 @@ export default function Recorder() {
     releaseStream();
     setCaptured(null);
     setMeetingId(null);
+    setTranscript(null);
     setElapsed(0);
     setPhase("idle");
   }, [releaseStream]);
+
+  const transcribe = useCallback(async () => {
+    if (!meetingId) return;
+    setError(null);
+    setPhase("transcribing");
+
+    try {
+      const response = await fetch(`/api/meetings/${meetingId}/transcribe`, {
+        method: "POST",
+      });
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        setError(payload?.error ?? `Transcription failed (HTTP ${response.status}).`);
+        setPhase("uploaded");
+        return;
+      }
+      setTranscript(payload?.transcript ?? null);
+      setPhase("transcribed");
+    } catch {
+      setError("Could not reach the transcription service. Retry in a moment.");
+      setPhase("uploaded");
+    }
+  }, [meetingId]);
 
   const submit = useCallback(async () => {
     if (!captured) return;
@@ -329,16 +367,63 @@ export default function Recorder() {
 
   return (
     <div className="recorder">
-      {phase === "uploaded" ? (
+      {phase === "uploaded" ||
+      phase === "transcribing" ||
+      phase === "transcribed" ? (
         <div className="panel panel-ok">
-          <h2>Audio captured</h2>
-          <p className="muted">
-            Meeting <code>{meetingId}</code> is stored and ready for
-            transcription.
-          </p>
-          <button type="button" className="btn" onClick={discard}>
-            Record another
-          </button>
+          {phase === "transcribed" ? (
+            <>
+              <h2>Transcript ready</h2>
+              <dl className="meta">
+                <div>
+                  <dt>Language</dt>
+                  <dd>{transcript?.language ?? "unknown"}</dd>
+                </div>
+                <div>
+                  <dt>Length</dt>
+                  <dd>{transcript?.characters.toLocaleString()} characters</dd>
+                </div>
+                <div>
+                  <dt>Segments</dt>
+                  <dd>{transcript?.segments ?? 0}</dd>
+                </div>
+                <div>
+                  <dt>Duration</dt>
+                  <dd>
+                    {transcript?.duration
+                      ? formatDuration(transcript.duration)
+                      : "unknown"}
+                  </dd>
+                </div>
+              </dl>
+              <div className="row">
+                <button type="button" className="btn" onClick={discard}>
+                  Start another meeting
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <h2>Audio captured</h2>
+              <p className="muted">
+                Meeting <code>{meetingId}</code> is stored. Transcribe it to get
+                the text.
+              </p>
+              <div className="row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={phase === "transcribing"}
+                  onClick={transcribe}
+                >
+                  {phase === "transcribing" ? "Transcribing…" : "Transcribe audio"}
+                </button>
+                <button type="button" className="btn" onClick={discard}>
+                  Record another
+                </button>
+              </div>
+            </>
+          )}
         </div>
       ) : captured ? (
         <div className="panel">

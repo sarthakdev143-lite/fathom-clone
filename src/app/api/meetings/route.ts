@@ -91,6 +91,7 @@ export async function POST(request: Request) {
     audioMime: audio.type || null,
     audioBytes: audio.size,
     durationSeconds,
+    audioBlob: new Uint8Array(await audio.arrayBuffer()),
   });
 
   return NextResponse.json({ meeting }, { status: 201 });

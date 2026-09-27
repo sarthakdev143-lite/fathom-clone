@@ -16,45 +16,78 @@ import path from "node:path";
 
 const LOCAL_DB_PATH = "file:./data/app.db";
 
-const SCHEMA = [
-  `CREATE TABLE IF NOT EXISTS meetings (
-     id                 TEXT PRIMARY KEY,
-     title              TEXT NOT NULL,
-     source             TEXT NOT NULL,
-     audio_filename     TEXT,
-     audio_mime         TEXT,
-     audio_bytes        INTEGER,
-     duration_seconds   REAL,
-     status             TEXT NOT NULL DEFAULT 'uploaded',
-     status_error       TEXT,
-     transcript         TEXT,
-     transcript_language TEXT,
-     summary_json       TEXT,
-     created_at         TEXT NOT NULL,
-     updated_at         TEXT NOT NULL
-   )`,
-  `CREATE INDEX IF NOT EXISTS meetings_created_at_idx ON meetings (created_at DESC)`,
+/**
+ * Forward-only migrations. Each entry moves the schema from version N to N+1 and
+ * is applied exactly once, recorded in `_migrations`. The initial CREATE TABLE is
+ * the version 0 shape and is deliberately never edited — later columns arrive via
+ * ALTER so existing databases upgrade in place.
+ */
+const MIGRATIONS: string[][] = [
+  // 0 -> 1: meetings
+  [
+    `CREATE TABLE IF NOT EXISTS meetings (
+       id                  TEXT PRIMARY KEY,
+       title               TEXT NOT NULL,
+       source              TEXT NOT NULL,
+       audio_filename      TEXT,
+       audio_mime          TEXT,
+       audio_bytes         INTEGER,
+       duration_seconds    REAL,
+       status              TEXT NOT NULL DEFAULT 'uploaded',
+       status_error        TEXT,
+       transcript          TEXT,
+       transcript_language TEXT,
+       summary_json        TEXT,
+       created_at          TEXT NOT NULL,
+       updated_at          TEXT NOT NULL
+     )`,
+    `CREATE INDEX IF NOT EXISTS meetings_created_at_idx ON meetings (created_at DESC)`,
+  ],
+  // 1 -> 2: keep the audio bytes so transcription is a separate retryable step
+  // instead of being welded onto the upload request.
+  [`ALTER TABLE meetings ADD COLUMN audio_blob BLOB`],
+  // 2 -> 3: word/segment timings, so summaries can cite real timestamps.
+  [`ALTER TABLE meetings ADD COLUMN transcript_segments_json TEXT`],
 ];
 
 export const isRemoteDb = Boolean(process.env.TURSO_DATABASE_URL);
 
-let client: Client | null = null;
 let ready: Promise<Client> | null = null;
 
 async function connect(): Promise<Client> {
   const url = process.env.TURSO_DATABASE_URL || LOCAL_DB_PATH;
 
   if (!process.env.TURSO_DATABASE_URL) {
-    const dir = path.dirname(path.resolve("data"));
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(path.dirname(path.resolve("data")), { recursive: true });
   }
 
-  client = createClient({
+  const client = createClient({
     url,
     authToken: process.env.TURSO_AUTH_TOKEN,
   });
 
-  await client.batch(SCHEMA.map((sql) => ({ sql, args: [] })), "write");
+  // The bookkeeping table has to exist before it can be asked what it contains.
+  await client.execute(
+    `CREATE TABLE IF NOT EXISTS _migrations (
+       version    INTEGER PRIMARY KEY,
+       applied_at TEXT NOT NULL
+     )`,
+  );
+
+  const result = await client.execute(
+    `SELECT COALESCE(MAX(version), 0) AS v FROM _migrations`,
+  );
+  const current = Number(result.rows[0]?.v ?? 0);
+
+  for (let version = current; version < MIGRATIONS.length; version++) {
+    const statements: { sql: string; args: (string | number)[] }[] =
+      MIGRATIONS[version].map((sql) => ({ sql, args: [] }));
+    statements.push({
+      sql: `INSERT OR IGNORE INTO _migrations (version, applied_at) VALUES (?, ?)`,
+      args: [version + 1, new Date().toISOString()],
+    });
+    await client.batch(statements, "write");
+  }
 
   return client;
 }
@@ -64,7 +97,6 @@ export function db(): Promise<Client> {
     ready = connect().catch((err) => {
       // Do not cache a failed connection; a later request should be able to retry.
       ready = null;
-      client = null;
       throw err;
     });
   }
