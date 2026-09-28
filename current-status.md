@@ -3,8 +3,25 @@
 A Fathom AI clone. Next.js App Router, API routes as the backend, SQLite for
 storage. Live at **https://8x-assignment-fantom-clone.vercel.app**.
 
-Last updated: 2026-09-28 (length caps removed, resumable pipeline, retry UI,
-sweeps, rate limiting, 103 automated tests + CI).
+Last updated: 2026-09-28 (export + ask-about-meeting, 121 tests).
+
+## Export and ask (2026-09-28)
+
+- **Export** (`src/lib/export.ts`, `TranscriptExport.tsx`): Markdown, plain
+  text and SRT, assembled client-side from the rendered transcript - no server
+  work, no model call. SRT is disabled without segment timings rather than
+  writing untimed subtitles.
+- **Ask about this meeting** (`src/lib/qa.ts`, `/api/meetings/[id]/ask`,
+  `MeetingChat.tsx`): the question ranks transcript segments by token overlap
+  and the best lines go into one prompt call with the summary, so long
+  meetings work with no index and nothing to keep in sync. Answers that the
+  transcript does not cover say so; citations are snapped onto real segment
+  starts and link to `?t=`. Read-only (no lease), rate-limited to 30 per
+  10 min per client, one 800-token call per question with the usual Groq/Gemini
+  fallback and JSON retry.
+
+Last updated before that: length caps removed, resumable pipeline, retry UI,
+sweeps, rate limiting, 103 automated tests + CI.
 
 ## Short answer: nothing is left unfinished
 

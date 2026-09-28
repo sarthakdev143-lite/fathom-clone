@@ -6,8 +6,10 @@ import {
   PlaybackProvider,
   TranscriptView,
 } from "@/components/MeetingPlayback";
+import MeetingChat from "@/components/MeetingChat";
 import PipelineActions from "@/components/PipelineActions";
 import SetupNotice from "@/components/SetupNotice";
+import TranscriptExport from "@/components/TranscriptExport";
 import { isTrustedBlobUrl } from "@/lib/blob-url";
 import { isDbConfigured } from "@/lib/config";
 import { getMeeting, getSegments } from "@/lib/meetings";
@@ -311,11 +313,25 @@ export default async function MeetingPage({
                 {" "}
                 · {segments.length} segments
               </span>
-            )}
+            )}{" "}
+            <TranscriptExport
+              title={meeting.title}
+              date={formatDate(meeting.created_at)}
+              language={meeting.transcript_language}
+              tldr={summary?.tldr ?? null}
+              segments={segments}
+              plainText={meeting.transcript}
+              hasTimings={hasTimings}
+            />
           </h2>
           <TranscriptView fallbackText={meeting.transcript} />
         </section>
       )}
+
+      <MeetingChat
+        meetingId={meeting.id}
+        canAsk={Boolean(meeting.transcript && meeting.transcript.trim())}
+      />
       </PlaybackProvider>
     </main>
   );

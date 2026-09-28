@@ -32,6 +32,7 @@ export const RATE_RULES = {
   transcribe: { name: "transcribe", limit: 40, windowSeconds: 600 },
   summarize: { name: "summarize", limit: 40, windowSeconds: 600 },
   search: { name: "search", limit: 90, windowSeconds: 60 },
+  ask: { name: "ask", limit: 30, windowSeconds: 600 },
 } satisfies Record<string, RateRule>;
 
 export function clientKey(request: Request): string {
