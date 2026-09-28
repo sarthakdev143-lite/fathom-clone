@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Also downloads the ffmpeg-static binary, which the chunked
+      # transcription tests run for real.
+      - run: npm ci
+
+      - run: npm run typecheck
+      - run: npm run lint
+      # Tests use a throwaway SQLite file and a faked network; no secrets needed.
+      - run: npm test
+      # Pages are dynamic, so the build needs no database or provider keys.
+      - run: npm run build
