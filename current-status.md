@@ -3,7 +3,8 @@
 A Fathom AI clone. Next.js App Router, API routes as the backend, SQLite for
 storage. Live at **https://8x-assignment-fantom-clone.vercel.app**.
 
-Last updated: 2026-09-27 (audio upload moved to Vercel Blob).
+Last updated: 2026-09-28 (length caps removed, resumable pipeline, retry UI,
+sweeps, rate limiting, 103 automated tests + CI).
 
 ## Short answer: nothing is left unfinished
 
@@ -68,6 +69,12 @@ a terminal state carrying `status_error`. Each stage can be re-run on its own.
 | `GEMINI_TRANSCRIBE_MODEL` | optional | Defaults to `gemini-3.5-transcribe`. |
 | `GEMINI_SUMMARY_MODEL` | optional | Defaults to `gemini-3.5-flash`. |
 | `SUMMARY_MODEL` | optional | Defaults to `openai/gpt-oss-120b`. |
+| `CRON_SECRET` | daily sweep | Vercel sends it to `/api/cron/sweep`; the route refuses without it. |
+| `PIPELINE_BUDGET_MS` | optional | Work per pipeline request before answering 202. Default 200000. |
+| `TRANSCRIBE_CHUNK_SECONDS` | optional | Chunk length for long audio. Default 900. |
+| `FFMPEG_PATH` | optional | Overrides the bundled `ffmpeg-static` binary. |
+| `RATE_LIMIT_DISABLED` | optional | `1` turns the per-IP limiter off. |
+| `LOG_LEVEL` | optional | `silent` suppresses structured logs (tests set it). |
 
 If a variable is missing in production the app renders a setup notice naming the
 variable instead of throwing a 500, and the write APIs return 503.
@@ -78,7 +85,8 @@ variable instead of throwing a 500, and the write APIs return 503.
 npm install
 npm run dev        # http://localhost:3000
 npm run db:seed    # re-seeds; makes live Groq calls, so it costs quota
-npm run check      # typecheck + lint + build
+npm test           # 103 tests, throwaway DB, faked network, real ffmpeg
+npm run check      # typecheck + lint + test + build
 ```
 
 ## Fixed
@@ -307,40 +315,147 @@ the query; clearing restores the 5-card list; no page errors. The LIKE query
 was verified directly against SQL; the FTS path served every check above with
 `"mode":"fts"`.
 
-These are all outside the assigned steps 1–5 and were left alone on purpose.
+## Long meetings, reliability and tests (2026-09-28)
 
-**1. Groq's 25 MB transcription cap is now the binding limit.** The upload path
-no longer constrains recording length, but Groq rejects audio over 25 MB, which
-caps a browser `webm/opus` recording at roughly 70 minutes. Anything larger
-uploads and then fails at transcription; the client warns above 25 MB rather than
-blocking, since the upload itself would succeed.
+Three gaps from the product-readiness review were closed: no automated tests,
+hard length caps, and reliability holes. Verified by 103 automated tests and a
+real-Groq end-to-end run (below).
 
-**2. Long meetings are summarised from a sampled transcript.** Independent of
-audio size, Groq's on-demand tier allows 8,000 tokens per minute, which also caps
-any single request. A 32-minute transcript runs to roughly 35,000 characters, so
-it cannot be sent whole and the call fails outright with a 413 rather than
-degrading. Transcripts over 24,000 characters are therefore sampled — segments
-are dropped at even intervals across the whole conversation, never truncated at
-the start, so the summary still reflects the arc of the meeting and every
-timestamp it cites remains a real segment start. The consequence is that an
-action item sitting in a skipped gap can be missed. `transcript_sampled` records
-this on the meeting row (nullable: null means summarised before the field
-existed), the summarize API returns it as `transcriptCoverage`, and the detail
-page badges it so a reader knows the summary is narrower than the transcript.
-Lifting the ceiling means chunking the audio and merging the segment offsets.
+### Length caps removed
 
-**3. Live mode is rate-limited and capped, and those caps are load-bearing.**
+**Transcription is chunked.** Audio over 14 MB (the smaller of the two providers'
+inline limits) is split server-side with ffmpeg (`ffmpeg-static`, shipped into
+the transcribe function via `outputFileTracingIncludes`) into ~15-minute pieces
+re-encoded as 16 kHz mono Opus at 32 kbit/s (~3.5 MB each). Each piece is
+transcribed on its own and segment offsets are shifted onto one timeline
+(`src/lib/transcribe.ts`). Cuts are placed in the nearest pause within 20 s of
+the nominal boundary (`findSilenceCut`), because fixed cuts split words: in
+testing "rules engine" came back as "rules and | engine" at a fixed 60 s cut,
+and intact once cut in the pause. Full chunks advance by exactly the requested
+length rather than ffmpeg's reported figure, which is ~20 ms short for Opus and
+would drift the timeline. Silent chunks are screened with `looksLikeSpeech`
+so a mid-meeting break does not insert "Thank you." Files at or under 14 MB take
+the original whole-file path unchanged. Upload limit raised from 100 MB to
+200 MB (bounded by the function's /tmp, which holds the source while splitting).
+
+**Summaries read the whole transcript.** Sampling is gone. A transcript over
+24,000 characters is split into ~16,000-character windows on segment boundaries
+(`buildWindows`); each is summarised ("map"), then the section summaries are
+merged ("reduce", split in halves first if they are too big for one call). Key
+moments from the merge are snapped onto the nearest real segment start.
+`transcript_sampled` is now always 0 for new summaries; the "sampled" badge only
+appears on older rows.
+
+**Both stages are resumable.** A Vercel function dies at `maxDuration` (set to
+300 s on both routes). Each request works until a 200 s budget
+(`PIPELINE_BUDGET_MS`) is spent, saves progress after every chunk/window
+(`transcript_progress_json`, `summary_progress_json`), and answers **202** for
+the client to call again. Provider retries get a deadline so a 60 s Retry-After
+never sleeps past the function's life. When every provider is rate limited the
+route returns 202 with `retryAfterSeconds` instead of failing - progress is
+still valid. `src/lib/pipeline-client.ts` drives the loop in the browser and
+also survives a platform-killed function (non-JSON 502/504).
+
+**Live mode's 20-minute ceiling is now 3 hours** (a safety net for a forgotten
+tab). What made it affordable:
+
+| Change | Effect |
+| --- | --- |
+| Rolling live summary | Past 24k chars, the previous provisional summary stands in for what it covered and only recent segments are sent. Call size is flat; nothing is sampled. |
+| Cadence stretches with time | 6 s slices for 10 min, 10 s to 30 min, 15 s after. 30 min: ~220 calls (was 300). 60 min: ~340 (was 600). |
+| Refresh interval stretches | 35 s → 60 s after 10 min → 120 s after 30 min. |
+| Slices downsampled to 16 kHz | 3x fewer upload bytes per slice; Whisper resamples to 16 kHz anyway. |
+
+### Reliability
+
+- **Retry/resume on the meeting page** (`src/components/PipelineActions.tsx`):
+  every non-ready state has an action - Transcribe and summarize (abandoned
+  upload), Summarize, Retry summary, Re-transcribe, Resume, and "Summarize
+  partial transcript" for an interrupted live recording.
+- **Processing lease** (`src/lib/lease.ts`): a conditional UPDATE so a retry
+  click and a still-running request never process the same meeting twice. TTL
+  330 s, so a killed request cannot block a meeting.
+- **Stale sessions are swept** (`src/lib/sweep.ts`): `live` rows silent for 10
+  min become `failed` with the partial transcript kept; `transcribing` /
+  `summarizing` rows idle 15 min with no lease become `failed` with progress
+  kept. The live poller heartbeats once a minute so an open tab is never swept,
+  and a swept row still finalises if the tab turns out to be alive. Runs on
+  every dashboard/meeting page load, and daily from Vercel cron
+  (`/api/cron/sweep`, requires `CRON_SECRET`), which also deletes uploaded audio
+  no meeting references once it is over a day old.
+- **JSON failures are retried** (`src/lib/json-completion.ts`): on Groq's 400
+  `json_validate_failed` the returned `failed_generation` is parsed first (often
+  usable), else the call is repeated without JSON mode; a wrong-shape reply is
+  retried with the parse error quoted back. Up to 3 attempts.
+- **Rate limiting** on every billable endpoint (`src/lib/rate-limit.ts`), per
+  client IP, fixed windows counted in the database so it holds across
+  instances. Fails open. `RATE_LIMIT_DISABLED=1` turns it off.
+- **Observability**: structured one-line JSON logs for every pipeline unit and
+  failure (`src/lib/log.ts`), `onRequestError` in `src/instrumentation.ts` for
+  unhandled errors, and `GET /api/health` (DB probe + config booleans, 503 when
+  the DB is down) for an uptime monitor.
+
+Bugs found and fixed along the way:
+
+- `!hasGeminiKey` in three routes tested the function, not its result, so the
+  "no provider configured" 503 could never fire.
+- With `GROQ_API_KEY` unset, `requireGroqKey()` threw inside the fetch `try` and
+  was retried five times with backoff (~15 s) before the Gemini fallback ran.
+- `recorderRef` was never assigned, so Stop only worked indirectly (ending the
+  tracks) and flashed the idle screen before the stop handler ran.
+- `db.ts` created the parent of `data/` rather than `data/` itself, so a fresh
+  clone failed on first request. Concurrent cold starts racing a migration
+  also failed a request; the loser now re-reads the version and continues.
+
+### Tests
+
+`npm test` runs 103 tests with Node's test runner via tsx; CI
+(`.github/workflows/ci.yml`) runs typecheck, lint, tests and build on every
+push and PR. Each test file gets a throwaway SQLite database and a faked
+network - no keys, never production. Covered: summary parsing (adversarial
+cases), windowing, map-reduce and resume, key-moment snapping, JSON-failure
+recovery, Groq retry/deadline policy, provider fallback, the SSRF URL check,
+leases, rate limits, the sweep, orphan blob cleanup, the client stage runner,
+WAV/downsampling, live cost controls, and **real ffmpeg splitting** of encoded
+WebM (chunk offsets, resume, rate-limit pause, silence-aligned cuts, silent
+chunks).
+
+### End-to-end against real Groq
+
+193 s of synthesized speech, forced through 60 s chunks: 4 chunks, cut at
+56.6 s / 116.4 s / 175.2 s (all sentence breaks), 43 segments, duration 193.5 s,
+8.7 s total. A 37k-character transcript went through 3 map windows plus a merge
+in 128 s in one request - Groq's 8k tokens-per-minute limit was ridden out via
+Retry-After - with every key moment on a real segment start.
+
+## Known limits
+
+**1. Chunk seams.** Cutting in pauses removes split words, but Whisper can
+still hallucinate a short filler ("Yeah.") in the silence right at a cut. One
+seam per 15 minutes of audio.
+
+**2. Groq's on-demand token limit sets summary speed.** At 8,000 tokens per
+minute each map window waits ~45 s for the previous one to clear, so a
+two-hour meeting (~8 windows) takes several minutes and several 202 round trips.
+A paid Groq tier or the Gemini fallback removes the wait; correctness is
+unaffected.
+
+**3. Processing needs the tab open.** The browser drives the 202 loop. Closing
+it pauses the work (progress kept); the meeting page's Resume continues it.
+Server-side completion would need a queue (Vercel Queues, Inngest).
+
+**4. Live mode thresholds that remain:**
 
 | Threshold | Value | Behaviour |
 | --- | --- | --- |
-| Baseline chunk cadence | 6 s | One slice of audio per tick while healthy. |
+| Baseline chunk cadence | 6 / 10 / 15 s | By elapsed time; see above. |
 | Backoff step | x2 | Any 429 or 5xx from the chunk or summary call. |
 | Backoff ceiling | 60 s | Cadence doubles to this and stops there. |
-| Cadence reset | on success | Any successful slice returns it to 6 s. |
-| Live ceiling | 20 min | Live updates stop; recording and the final summary continue. |
+| Cadence reset | on success | Back to the time-based baseline. |
+| Live ceiling | 3 h | Live updates stop; recording and the final summary continue. |
 | Max slice length | 20 s | A slice is trimmed to its most recent 20 s. |
 | Poll interval | 2 s | Caption and summary deltas, guarded against overlap. |
-| Summary refresh | every 35 s of new audio | Provisional summary regeneration. |
+| Summary refresh | 35 / 60 / 120 s of new audio | By elapsed time. |
 
 Three things are deliberate here. A rate limit is logged and ridden out rather
 than surfaced, because a person recording should not be interrupted by billing.
@@ -360,28 +475,21 @@ overwrites. Verified by forcing 429s through to the 60-second ceiling and then
 confirming the post-stop transcribe and summarize still completed in 6.0 s and
 6.6 s.
 
-**4. No retry affordance for a failed meeting.** The detail page is read-only, so
-a meeting stuck in `failed` has to be re-driven from the record page. Both
-`transcribe` and `summarize` are safely re-runnable; only the UI affordance is
-missing.
-
-**5. Abandoned live sessions linger.** Closing the tab mid-recording leaves the row
-in `live` forever, since nothing server-side knows the browser is gone. The
-dashboard labels such rows "Interrupted" after two minutes of silence rather
-than pretending they are still recording, but the audio and partial transcript are
-not cleaned up automatically.
-
-**6. Live captions can contain seam artifacts.** Each 6-second slice is
+**5. Live captions can contain seam artifacts.** Each live slice is
 transcribed independently, so a sentence spanning a boundary can be cut or
 repeated. This is exactly why the authoritative transcript re-transcribes the
 complete audio rather than reusing the live one, and why the live view is
 labelled provisional.
 
-**7. Live mode costs extra model calls.** A 30-minute meeting sends 300 chunk
-transcriptions plus roughly 50 summary refreshes. It is off by default only for
-uploads, not for recordings - recordings default to on, because a user who
-records a meeting usually wants the live view. The toggle is in the capture
-panel.
+**6. Live mode costs extra model calls.** A 30-minute meeting sends ~220 slice
+transcriptions plus ~30 summary refreshes (was 300 + 50). Recordings default to
+on, because a user who records a meeting usually wants the live view. The
+toggle is in the capture panel.
+
+**7. `CRON_SECRET` must be set on Vercel** for the daily sweep and orphan-blob
+cleanup to run; without it `/api/cron/sweep` refuses (503). The meeting sweep
+still runs on page loads regardless. `maxDuration = 300` needs Fluid compute
+(the default for new projects) on the Hobby plan.
 
 **8. No audio playback for meetings recorded before blob storage.** Those rows kept
 their audio in the `audio_blob` column, and playback reads `audio_url` only, so
@@ -392,16 +500,9 @@ player. Serving the legacy column would need a small streaming endpoint.
 existing `source = 'seed'` rows first, which makes it idempotent but not
 free.
 
-**10. The summariser is not retried when the model refuses to produce JSON.**
-Rate limits and 5xx are retried with backoff and malformed JSON is parsed
-defensively, but two failure modes still need a manual re-run. Groq sometimes
-answers a `json_object` request with HTTP 400 `failed_generation`, which is not a
-retryable status, so the meeting goes straight to `failed`. And if the model
-returns valid JSON of the wrong shape, the same happens. Both were observed while
-testing - a single transient `failed_generation` cost one meeting its summary,
-and re-running produced one immediately. A future fix would retry a 400 whose
-error code is `failed_generation`, or drop `response_format` and lean on the
-defensive parser that already exists.
+**10. ffmpeg-static ships a GPL-3.0 ffmpeg binary.** It is executed as a
+separate process, not linked, which is the usual reading for a hosted service,
+but it is worth a line in any licence review.
 
 **11. No authentication.** Anyone who can reach the app can list every meeting and
 open any meeting whose id they have. Blob URLs contain a random suffix, so the

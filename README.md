@@ -29,6 +29,16 @@ npm run dev
 
 Open http://localhost:3000. `npm run db:seed` adds four example meetings.
 
+```bash
+npm test        # automated tests; no keys needed, never touches .env.local
+npm run check   # typecheck + lint + test + build (what CI runs)
+```
+
+Recordings of any length work: audio over 14 MB is split with ffmpeg
+(bundled via `ffmpeg-static`) and long transcripts are summarised in windows,
+both resumable across requests. On Vercel, set `CRON_SECRET` so the daily
+cleanup cron runs.
+
 ## Deliberately not built
 
 - Bot-based Zoom / Meet / Teams joining
