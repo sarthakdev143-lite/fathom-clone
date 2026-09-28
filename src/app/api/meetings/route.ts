@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { isDbConfigured } from "@/lib/config";
 import { isTrustedBlobUrl } from "@/lib/blob-url";
 import { createMeeting } from "@/lib/meetings";
+import { RATE_RULES, rateLimit } from "@/lib/rate-limit";
 import type { MeetingSource } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -49,6 +50,9 @@ export async function POST(request: Request) {
       { status: 503 },
     );
   }
+
+  const limited = await rateLimit(request, RATE_RULES.createMeeting);
+  if (limited) return limited;
 
   let body: CreateMeetingBody;
   try {

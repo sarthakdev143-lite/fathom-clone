@@ -3,6 +3,7 @@ import MeetingSearch from "@/components/MeetingSearch";
 import SetupNotice from "@/components/SetupNotice";
 import { isDbConfigured } from "@/lib/config";
 import { listMeetings } from "@/lib/meetings";
+import { sweepQuietly } from "@/lib/sweep";
 import type { Meeting, MeetingStatus } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -57,6 +58,7 @@ export default async function Dashboard() {
     );
   }
 
+  await sweepQuietly();
   const meetings = await listMeetings();
   const readyCount = meetings.filter((m) => m.status === "ready").length;
   const openActions = meetings.reduce(

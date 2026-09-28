@@ -6,10 +6,12 @@ import {
   PlaybackProvider,
   TranscriptView,
 } from "@/components/MeetingPlayback";
+import PipelineActions from "@/components/PipelineActions";
 import SetupNotice from "@/components/SetupNotice";
 import { isTrustedBlobUrl } from "@/lib/blob-url";
 import { isDbConfigured } from "@/lib/config";
 import { getMeeting, getSegments } from "@/lib/meetings";
+import { sweepQuietly } from "@/lib/sweep";
 import type { MeetingSummary } from "@/lib/summary";
 import type { MeetingStatus } from "@/lib/types";
 
@@ -37,6 +39,10 @@ function isStaleLive(status: MeetingStatus, updatedAt: string): boolean {
   const updated = new Date(updatedAt).getTime();
   if (Number.isNaN(updated)) return true;
   return (Date.now() - updated) / 1000 > LIVE_STALE_SECONDS;
+}
+
+function isLeaseActive(leaseUntil: number | null | undefined): boolean {
+  return typeof leaseUntil === "number" && leaseUntil > Date.now();
 }
 
 function formatDuration(totalSeconds: number | null): string {
@@ -140,6 +146,7 @@ export default async function MeetingPage({
     );
   }
 
+  await sweepQuietly();
   const meeting = await getMeeting(id);
 
   if (!meeting) notFound();
@@ -199,6 +206,16 @@ export default async function MeetingPage({
           {meeting.status_error}
         </p>
       )}
+
+      <PipelineActions
+        meetingId={meeting.id}
+        status={meeting.status}
+        canTranscribe={
+          audioUrl !== null || (meeting.audio_url == null && Boolean(meeting.audio_filename))
+        }
+        hasTranscript={Boolean(meeting.transcript && meeting.transcript.trim())}
+        processingElsewhere={isLeaseActive(meeting.lease_until)}
+      />
 
       {meeting.transcript_provider === "gemini" && (
         <p className="fallback-note" role="status">
