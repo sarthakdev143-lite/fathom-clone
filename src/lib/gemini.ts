@@ -73,6 +73,7 @@ async function geminiFetch(
   payload: unknown,
   label: string,
   maxAttempts = 3,
+  deadline = Number.POSITIVE_INFINITY,
 ): Promise<Record<string, unknown>> {
   let lastStatus = 0;
   let lastBody = "";
@@ -91,7 +92,7 @@ async function geminiFetch(
         },
       );
     } catch (err) {
-      if (attempt === maxAttempts) {
+      if (attempt === maxAttempts || Date.now() + 500 * 2 ** attempt > deadline) {
         throw new GeminiError(
           `${label} could not reach Gemini: ${
             err instanceof Error ? err.message : "network error"
@@ -115,7 +116,9 @@ async function geminiFetch(
     // 429 is Gemini's free-tier per-minute limit and does clear, so it is worth
     // waiting out. A 400 will not fix itself.
     if (response.status !== 429 || attempt === maxAttempts) break;
-    await new Promise((r) => setTimeout(r, Math.min(20_000, 2000 * 2 ** attempt)));
+    const waitMs = Math.min(20_000, 2000 * 2 ** attempt);
+    if (Date.now() + waitMs > deadline) break;
+    await new Promise((r) => setTimeout(r, waitMs));
   }
 
   throw new GeminiError(
@@ -190,6 +193,7 @@ export async function transcribeWithGemini(input: {
   audio: Uint8Array;
   filename: string;
   mimeType: string | null;
+  deadline?: number;
 }): Promise<GeminiTranscription> {
   if (input.audio.byteLength === 0) {
     throw new Error("The stored audio is empty, so there is nothing to transcribe.");
@@ -222,6 +226,8 @@ export async function transcribeWithGemini(input: {
       ],
     },
     "Gemini transcription",
+    3,
+    input.deadline,
   );
 
   const parts = responseParts(json);
@@ -246,6 +252,8 @@ export async function transcribeWithGemini(input: {
 export async function summarizeWithGemini(input: {
   system: string;
   user: string;
+  maxTokens?: number;
+  deadline?: number;
 }): Promise<string> {
   const json = await geminiFetch(
     GEMINI_SUMMARY_MODEL,
@@ -254,11 +262,13 @@ export async function summarizeWithGemini(input: {
       contents: [{ role: "user", parts: [{ text: input.user }] }],
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 2000,
+        maxOutputTokens: input.maxTokens ?? 2000,
         responseMimeType: "application/json",
       },
     },
     "Gemini summarization",
+    3,
+    input.deadline,
   );
 
   const parts = responseParts(json);

@@ -65,6 +65,8 @@ export async function transcribeAudio(input: {
   audio: Uint8Array;
   filename: string;
   mimeType: string | null;
+  /** Epoch ms by which retries must give up. */
+  deadline?: number;
 }): Promise<TranscriptionOutcome> {
   try {
     const result = await transcribeWithGroq(input);
@@ -133,6 +135,7 @@ export async function runSummary(input: {
   temperature?: number;
   maxTokens?: number;
   jsonMode?: boolean;
+  deadline?: number;
 }): Promise<SummaryOutcome> {
   try {
     const completion = await chatCompletion({
@@ -142,6 +145,7 @@ export async function runSummary(input: {
       temperature: input.temperature,
       maxTokens: input.maxTokens,
       jsonMode: input.jsonMode,
+      deadline: input.deadline,
     });
     return {
       content: completion.content,
@@ -169,6 +173,8 @@ export async function runSummary(input: {
     const content = await summarizeWithGemini({
       system: input.system,
       user: input.user,
+      maxTokens: input.maxTokens,
+      deadline: input.deadline,
     });
 
     return {
@@ -180,6 +186,18 @@ export async function runSummary(input: {
       fallbackReason: reason,
     };
   }
+}
+
+/**
+ * True when every provider that was tried is rate limited or temporarily down.
+ * The resumable pipeline treats this as "come back shortly" rather than a
+ * failure, because the progress made so far is still valid.
+ */
+export function isTransientProviderError(error: unknown): boolean {
+  if (error instanceof GroqError || error instanceof GeminiError) {
+    return error.status === 429 || error.status >= 500 || error.status === 0;
+  }
+  return false;
 }
 
 export { WHISPER_MODEL };

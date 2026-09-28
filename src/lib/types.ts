@@ -40,6 +40,8 @@ export interface Meeting {
   live_summary_seq?: number;
   /** How much audio the live pipeline has consumed, in seconds. */
   live_audio_seconds?: number;
+  /** Epoch ms until which a request holds the processing lease, if any. */
+  lease_until?: number | null;
   created_at: string;
   updated_at: string;
 }

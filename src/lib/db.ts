@@ -72,6 +72,30 @@ const MIGRATIONS: string[][] = [
   // visible rather than invisible. NULL on meetings transcribed before this.
   [`ALTER TABLE meetings ADD COLUMN transcript_provider TEXT`],
   [`ALTER TABLE meetings ADD COLUMN transcript_fallback_reason TEXT`],
+  // 7 -> 8: resumable pipeline. Long audio is transcribed in chunks and long
+  // transcripts are summarised in windows, across several requests if needed.
+  // Progress is persisted after every unit of work so a timed-out or crashed
+  // request resumes where it stopped instead of starting over.
+  [`ALTER TABLE meetings ADD COLUMN transcript_progress_json TEXT`],
+  [`ALTER TABLE meetings ADD COLUMN summary_progress_json TEXT`],
+  // A processing lease, so two requests (a retry click and a still-running
+  // loop, say) never work on the same meeting at once. Epoch milliseconds.
+  [
+    `ALTER TABLE meetings ADD COLUMN lease_until INTEGER`,
+    `ALTER TABLE meetings ADD COLUMN lease_owner TEXT`,
+  ],
+  // 8 -> 9: fixed-window rate limiting. Held in the database rather than in
+  // memory because serverless instances do not share memory.
+  [
+    `CREATE TABLE IF NOT EXISTS rate_limits (
+       bucket       TEXT NOT NULL,
+       window_start INTEGER NOT NULL,
+       count        INTEGER NOT NULL,
+       PRIMARY KEY (bucket, window_start)
+     )`,
+  ],
+  // 9 -> 10: the stale-meeting sweep filters on status and age.
+  [`CREATE INDEX IF NOT EXISTS meetings_status_updated_idx ON meetings (status, updated_at)`],
 ];
 
 export const isRemoteDb = Boolean(process.env.TURSO_DATABASE_URL);
@@ -82,7 +106,9 @@ async function connect(): Promise<Client> {
   const url = process.env.TURSO_DATABASE_URL || LOCAL_DB_PATH;
 
   if (!process.env.TURSO_DATABASE_URL) {
-    mkdirSync(path.dirname(path.resolve("data")), { recursive: true });
+    // The directory the database file lives in, not its parent: libSQL will
+    // create the file but not a missing folder, so a fresh clone would fail.
+    mkdirSync(path.resolve("data"), { recursive: true });
   }
 
   const client = createClient({
@@ -98,19 +124,32 @@ async function connect(): Promise<Client> {
      )`,
   );
 
-  const result = await client.execute(
-    `SELECT COALESCE(MAX(version), 0) AS v FROM _migrations`,
-  );
-  const current = Number(result.rows[0]?.v ?? 0);
+  const currentVersion = async () => {
+    const result = await client.execute(
+      `SELECT COALESCE(MAX(version), 0) AS v FROM _migrations`,
+    );
+    return Number(result.rows[0]?.v ?? 0);
+  };
 
-  for (let version = current; version < MIGRATIONS.length; version++) {
+  let version = await currentVersion();
+  while (version < MIGRATIONS.length) {
     const statements: { sql: string; args: (string | number)[] }[] =
       MIGRATIONS[version].map((sql) => ({ sql, args: [] }));
     statements.push({
       sql: `INSERT OR IGNORE INTO _migrations (version, applied_at) VALUES (?, ?)`,
       args: [version + 1, new Date().toISOString()],
     });
-    await client.batch(statements, "write");
+    try {
+      await client.batch(statements, "write");
+      version += 1;
+    } catch (err) {
+      // Two cold starts can race to apply the same migration; the loser's
+      // ALTER fails with "duplicate column". If someone else has moved the
+      // schema on, carry on from there instead of failing the request.
+      const after = await currentVersion();
+      if (after <= version) throw err;
+      version = after;
+    }
   }
 
   return client;

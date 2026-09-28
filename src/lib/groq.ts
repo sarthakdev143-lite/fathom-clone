@@ -17,13 +17,42 @@ export const GROQ_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export class GroqError extends Error {
   readonly status: number;
   readonly detail: string;
+  /** Groq's machine-readable error code, e.g. `json_validate_failed`. */
+  readonly code: string | null;
+  /**
+   * On a JSON-mode failure Groq returns what the model actually produced. It is
+   * often usable JSON that merely failed strict validation, so it is kept.
+   */
+  readonly failedGeneration: string | null;
 
-  constructor(message: string, status: number, detail: string) {
+  constructor(
+    message: string,
+    status: number,
+    detail: string,
+    extra?: { code?: string | null; failedGeneration?: string | null },
+  ) {
     super(message);
     this.name = "GroqError";
     this.status = status;
     this.detail = detail;
+    this.code = extra?.code ?? null;
+    this.failedGeneration = extra?.failedGeneration ?? null;
   }
+}
+
+/**
+ * True for the 400 Groq returns when a `json_object` request produced output
+ * it refused to hand back. Not a caller error: the same request usually
+ * succeeds on a second try, or without JSON mode.
+ */
+export function isFailedGeneration(error: unknown): error is GroqError {
+  return (
+    error instanceof GroqError &&
+    error.status === 400 &&
+    (error.code === "json_validate_failed" ||
+      error.failedGeneration !== null ||
+      /failed_generation|failed to generate json/i.test(error.detail))
+  );
 }
 
 export function requireGroqKey(): string {
@@ -42,22 +71,33 @@ interface RawSegment {
   text?: string;
 }
 
-function decodeErrorBody(body: string): string {
+export function decodeErrorBody(body: string): {
+  message: string;
+  code: string | null;
+  failedGeneration: string | null;
+} {
   try {
     const parsed: unknown = JSON.parse(body);
     if (parsed && typeof parsed === "object") {
       const record = parsed as Record<string, unknown>;
-      const message = record.error;
-      if (typeof message === "string") return message;
-      if (message && typeof message === "object") {
-        const nested = (message as Record<string, unknown>).message;
-        if (typeof nested === "string") return nested;
+      const error = record.error;
+      if (typeof error === "string") {
+        return { message: error, code: null, failedGeneration: null };
+      }
+      if (error && typeof error === "object") {
+        const nested = error as Record<string, unknown>;
+        return {
+          message: typeof nested.message === "string" ? nested.message : body.slice(0, 500),
+          code: typeof nested.code === "string" ? nested.code : null,
+          failedGeneration:
+            typeof nested.failed_generation === "string" ? nested.failed_generation : null,
+        };
       }
     }
   } catch {
     // fall through to the raw body
   }
-  return body.slice(0, 500);
+  return { message: body.slice(0, 500), code: null, failedGeneration: null };
 }
 
 const MAX_ATTEMPTS = 5;
@@ -73,11 +113,17 @@ function sleep(ms: number): Promise<void> {
  *
  * `buildInit` is a factory rather than a value so each attempt gets a fresh
  * body: a consumed request body cannot be replayed.
+ *
+ * `deadline` (epoch ms) stops the retry loop from sleeping past the calling
+ * function's own lifetime. Without it a 60 s Retry-After, taken five times,
+ * would outlive any serverless function and the work would be lost silently
+ * instead of being reported and resumed.
  */
 async function fetchGroq(
   url: string,
   buildInit: () => RequestInit,
   label: string,
+  deadline = Number.POSITIVE_INFINITY,
 ): Promise<Response> {
   let lastStatus = 0;
   let lastBody = "";
@@ -85,13 +131,17 @@ async function fetchGroq(
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     attempts = attempt;
+    // Built outside the try: a missing API key is a configuration error, not a
+    // network blip, and must surface at once instead of after five backoffs.
+    const init = buildInit();
     let response: Response;
     try {
-      response = await fetch(url, buildInit());
+      response = await fetch(url, init);
     } catch (err) {
       // A connection-level failure is worth one more try.
-      if (attempt === MAX_ATTEMPTS) throw err;
-      await sleep(Math.min(8000, 500 * 2 ** attempt) + Math.random() * 300);
+      const waitMs = Math.min(8000, 500 * 2 ** attempt) + Math.random() * 300;
+      if (attempt === MAX_ATTEMPTS || Date.now() + waitMs > deadline) throw err;
+      await sleep(waitMs);
       continue;
     }
 
@@ -109,18 +159,21 @@ async function fetchGroq(
         ? Math.min(60_000, retryAfter * 1000)
         : Math.min(20_000, 1000 * 2 ** (attempt - 1)) + Math.random() * 500;
 
+    if (Date.now() + waitMs > deadline) break;
     await sleep(waitMs);
   }
 
   // Report the attempts actually made. Claiming the full retry budget on a 400,
   // which is never retried, sends whoever is debugging this looking in the
   // wrong place.
+  const decoded = decodeErrorBody(lastBody);
   throw new GroqError(
     `${label} failed (HTTP ${lastStatus}) after ${attempts} attempt${
       attempts === 1 ? "" : "s"
     }`,
     lastStatus,
-    decodeErrorBody(lastBody),
+    decoded.message,
+    { code: decoded.code, failedGeneration: decoded.failedGeneration },
   );
 }
 
@@ -168,6 +221,7 @@ export async function transcribeAudio(input: {
   audio: Uint8Array;
   filename: string;
   mimeType: string | null;
+  deadline?: number;
 }): Promise<GroqTranscription> {
   if (input.audio.byteLength === 0) {
     throw new Error("The stored audio is empty, so there is nothing to transcribe.");
@@ -196,6 +250,7 @@ export async function transcribeAudio(input: {
       body: form,
     }),
     "Groq transcription",
+    input.deadline,
   );
 
   const body = await response.text();
@@ -242,6 +297,7 @@ export async function chatCompletion(input: {
   temperature?: number;
   maxTokens?: number;
   jsonMode?: boolean;
+  deadline?: number;
 }): Promise<GroqChatResult> {
   const payload = JSON.stringify({
     model: input.model,
@@ -265,6 +321,7 @@ export async function chatCompletion(input: {
       body: payload,
     }),
     "Groq chat completion",
+    input.deadline,
   );
 
   const body = await response.text();

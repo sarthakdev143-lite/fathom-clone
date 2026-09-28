@@ -61,7 +61,7 @@ export async function createMeeting(input: {
 const PUBLIC_COLUMNS = `id, title, source, audio_filename, audio_mime, audio_bytes,
        duration_seconds, status, status_error, transcript, transcript_language,
        summary_json, audio_url, transcript_sampled, transcript_provider,
-       transcript_fallback_reason, created_at, updated_at`;
+       transcript_fallback_reason, lease_until, created_at, updated_at`;
 
 /**
  * The dashboard only renders title, metadata, status and the summary, so listing
@@ -143,7 +143,7 @@ export async function loadAudio(meeting: Meeting): Promise<AudioSource | null> {
 }
 
 /** Reads the pre-blob `audio_blob` column. */
-async function getLegacyAudioBlob(id: string): Promise<Uint8Array | null> {
+export async function getLegacyAudioBlob(id: string): Promise<Uint8Array | null> {
   const client = await db();
   const result = await client.execute({
     sql: `SELECT audio_blob FROM meetings WHERE id = ?`,
@@ -182,7 +182,8 @@ export async function saveTranscript(
     sql: `UPDATE meetings
           SET transcript = ?, transcript_language = ?, duration_seconds = COALESCE(?, duration_seconds),
               transcript_segments_json = ?, status = ?, status_error = NULL,
-              transcript_provider = ?, transcript_fallback_reason = ?, updated_at = ?
+              transcript_provider = ?, transcript_fallback_reason = ?, updated_at = ?,
+              transcript_progress_json = NULL, summary_progress_json = NULL
           WHERE id = ?`,
     args: [
       transcript.text,
@@ -239,7 +240,7 @@ export async function saveSummary(
   await client.execute({
     sql: `UPDATE meetings
           SET summary_json = ?, transcript_sampled = ?, status = 'ready',
-              status_error = NULL, updated_at = ?
+              status_error = NULL, updated_at = ?, summary_progress_json = NULL
           WHERE id = ?`,
     args: [
       JSON.stringify(summary),
@@ -247,6 +248,42 @@ export async function saveSummary(
       new Date().toISOString(),
       id,
     ],
+  });
+}
+
+type ProgressColumn = "transcript_progress_json" | "summary_progress_json";
+
+/**
+ * Reads persisted pipeline progress. Anything unparseable reads as "no
+ * progress", which restarts the stage - always safe, just slower.
+ */
+export async function readProgress<T>(
+  id: string,
+  column: ProgressColumn,
+): Promise<T | null> {
+  const client = await db();
+  const result = await client.execute({
+    sql: `SELECT ${column} AS value FROM meetings WHERE id = ?`,
+    args: [id],
+  });
+  const raw: unknown = result.rows[0]?.value;
+  if (typeof raw !== "string" || raw === "") return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeProgress(
+  id: string,
+  column: ProgressColumn,
+  value: unknown,
+): Promise<void> {
+  const client = await db();
+  await client.execute({
+    sql: `UPDATE meetings SET ${column} = ?, updated_at = ? WHERE id = ?`,
+    args: [value === null ? null : JSON.stringify(value), new Date().toISOString(), id],
   });
 }
 
