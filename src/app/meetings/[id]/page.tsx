@@ -1,6 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import {
+  AudioPlayer,
+  KeyMomentList,
+  PlaybackProvider,
+  TranscriptView,
+} from "@/components/MeetingPlayback";
 import SetupNotice from "@/components/SetupNotice";
+import { isTrustedBlobUrl } from "@/lib/blob-url";
 import { isDbConfigured } from "@/lib/config";
 import { getMeeting, getSegments } from "@/lib/meetings";
 import type { MeetingSummary } from "@/lib/summary";
@@ -56,12 +63,70 @@ function parseSummary(raw: string | null): MeetingSummary | null {
   }
 }
 
+/**
+ * Reads ?t=SECONDS. Anything that is not a finite, non-negative number is
+ * ignored rather than rejected, since a mangled share link should still open
+ * the meeting. Values past the end are clamped to the recording's length.
+ */
+function parseStartTime(
+  raw: string | string[] | undefined,
+  durationSeconds: number | null,
+): number | null {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (value === undefined || value.trim() === "") return null;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  if (durationSeconds !== null && Number.isFinite(durationSeconds)) {
+    return Math.min(seconds, Math.max(0, durationSeconds - 0.5));
+  }
+  return seconds;
+}
+
+/**
+ * Explains, in one sentence, why playback or seeking is limited - or returns
+ * null when everything works. Kept here rather than in the client component
+ * because the reason depends on how the meeting was created, which only the
+ * server knows.
+ */
+function playbackNote(input: {
+  hasAudio: boolean;
+  hasTimings: boolean;
+  source: string;
+  hadLegacyAudio: boolean;
+}): string | null {
+  const jumpsToText = input.hasTimings
+    ? " Timestamps still jump to the matching line in the transcript."
+    : "";
+
+  if (!input.hasAudio) {
+    if (input.source === "seed") {
+      return `This is a seeded demo meeting generated from a script, so there is no recording to play.${jumpsToText}`;
+    }
+    if (input.hadLegacyAudio) {
+      return `This meeting was recorded before audio playback was added, so its recording cannot be played here.${jumpsToText}`;
+    }
+    return `No recording is stored for this meeting.${jumpsToText}`;
+  }
+
+  if (!input.hasTimings) {
+    return (
+      "This transcript came from the fallback provider, which does not return " +
+      "timestamps, so lines cannot be jumped to. Use the player's scrubber to move around."
+    );
+  }
+
+  return null;
+}
+
 export default async function MeetingPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  const query = await searchParams;
 
   if (!isDbConfigured) {
     return (
@@ -81,6 +146,18 @@ export default async function MeetingPage({
 
   const summary = parseSummary(meeting.summary_json);
   const segments = await getSegments(id);
+
+  // Re-checked at render time, not just when stored: the value ends up in an
+  // <audio src>, and a URL that is not a Vercel Blob URL has no business there.
+  const audioUrl = isTrustedBlobUrl(meeting.audio_url) ? meeting.audio_url : null;
+  const hasTimings = segments.length > 0;
+  const initialTime = parseStartTime(query.t, meeting.duration_seconds);
+  const note = playbackNote({
+    hasAudio: audioUrl !== null,
+    hasTimings,
+    source: meeting.source,
+    hadLegacyAudio: meeting.audio_url == null && Boolean(meeting.audio_filename),
+  });
 
   return (
     <main>
@@ -131,6 +208,15 @@ export default async function MeetingPage({
             : "."}
         </p>
       )}
+
+      <PlaybackProvider
+        meetingId={meeting.id}
+        segments={segments}
+        hasTimings={hasTimings}
+        canPlay={audioUrl !== null}
+        initialTime={initialTime}
+      >
+      <AudioPlayer audioUrl={audioUrl} note={note} />
 
       {summary ? (
         <section className="card" style={{ marginBottom: "1.5rem" }}>
@@ -189,14 +275,7 @@ export default async function MeetingPage({
           {summary.key_moments.length > 0 && (
             <div className="block">
               <h3>Key moments</h3>
-              <ul className="moments">
-                {summary.key_moments.map((moment) => (
-                  <li key={moment.timestamp}>
-                    <code>{formatDuration(moment.timestamp)}</code>
-                    <span>{moment.label}</span>
-                  </li>
-                ))}
-              </ul>
+              <KeyMomentList moments={summary.key_moments} />
             </div>
           )}
         </section>
@@ -217,22 +296,10 @@ export default async function MeetingPage({
               </span>
             )}
           </h2>
-          {segments.length > 0 ? (
-            <ol className="transcript">
-              {segments.map((segment) => (
-                <li key={`${segment.start}-${segment.end}`}>
-                  <code className="transcript-time">
-                    {formatDuration(segment.start)}
-                  </code>
-                  <span>{segment.text}</span>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p style={{ margin: 0 }}>{meeting.transcript}</p>
-          )}
+          <TranscriptView fallbackText={meeting.transcript} />
         </section>
       )}
+      </PlaybackProvider>
     </main>
   );
 }
