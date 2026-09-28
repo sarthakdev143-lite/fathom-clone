@@ -1,5 +1,6 @@
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { isUploadConfigured } from "@/lib/config";
+import { RATE_RULES, rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,13 +16,13 @@ export const dynamic = "force-dynamic";
  */
 
 /**
- * 100 MB is roughly three and a half hours of Opus at typical MediaRecorder
- * bitrates. It is a storage sanity bound, not the real constraint: Groq's
- * transcription endpoint caps audio at 25 MB (see `src/lib/groq.ts`), so a
- * recording larger than that will upload successfully and then be rejected at
- * the transcription step.
+ * 200 MB is roughly nine hours of MediaRecorder Opus, or about 18 minutes of
+ * uncompressed 48 kHz stereo WAV. Provider upload caps no longer apply here:
+ * audio over 14 MB is split into chunks server-side before transcription (see
+ * `src/lib/transcribe.ts`). The bound that remains is the function's /tmp
+ * space, which holds the source file while it is split.
  */
-export const MAX_AUDIO_BYTES = 100 * 1024 * 1024;
+export const MAX_AUDIO_BYTES = 200 * 1024 * 1024;
 
 /**
  * Explicit allowlist. `allowedContentTypes` is matched against the content type
@@ -71,6 +72,12 @@ export async function POST(request: Request) {
       { error: "Expected a JSON upload request." },
       { status: 400 },
     );
+  }
+
+  // Only token minting is limited; it is the call that authorises storage.
+  if (body.type === "blob.generate-client-token") {
+    const limited = await rateLimit(request, RATE_RULES.uploadToken);
+    if (limited) return limited;
   }
 
   try {
