@@ -1,9 +1,10 @@
 /**
- * Step 3: summarization.
+ * Step 3: summarization - prompts, windowing and parsing.
  *
- * The whole summary comes from a single prompt call that is required to return
- * one JSON object. There is no second pass, no per-field retry and no
- * post-hoc model call — whatever this returns is what gets stored.
+ * A transcript that fits the prompt budget is summarised in one call. A longer
+ * one is split into windows that are each summarised on their own ("map"),
+ * then merged into one summary ("reduce"), so every sentence of the meeting is
+ * read. The orchestration lives in `summarize.ts`; everything here is pure.
  */
 
 /**
@@ -69,7 +70,17 @@ Rules:
  * the model still sees the arc of the conversation and the timestamps it cites
  * stay real.
  */
-const MAX_TRANSCRIPT_CHARS = 24_000;
+export const MAX_TRANSCRIPT_CHARS = 24_000;
+
+/**
+ * Size of one map window. Smaller than the single-pass budget because a map
+ * call runs back to back with others against the same per-minute token
+ * allowance, and leaves room for the prompt and a 1,500-token reply.
+ */
+export const WINDOW_CHARS = 16_000;
+
+/** Upper bound on the section summaries sent to one reduce call. */
+export const REDUCE_INPUT_CHARS = 20_000;
 
 export interface PromptBuild {
   prompt: string;
@@ -79,7 +90,7 @@ export interface PromptBuild {
   segmentsTotal: number;
 }
 
-function renderSegments(
+export function renderSegments(
   segments: { start: number; end: number; text: string }[],
   sampled: boolean,
 ): string {
@@ -158,6 +169,205 @@ export function buildSummaryPrompt(input: SummarizeInput): PromptBuild {
     segmentsUsed: segments.length,
     segmentsTotal: input.segments.length,
   };
+}
+
+/** True when the whole transcript fits one summarization call. */
+export function fitsSinglePass(input: SummarizeInput): boolean {
+  if (input.segments.length > 0) {
+    return renderSegments(input.segments, false).length <= MAX_TRANSCRIPT_CHARS;
+  }
+  return input.transcript.length <= MAX_TRANSCRIPT_CHARS;
+}
+
+export interface TranscriptWindow {
+  /** Human-readable span, e.g. "00:00-15:02", or "part 2" without timings. */
+  label: string;
+  body: string;
+  /** Offsets in seconds, or null when the transcript has no timings. */
+  start: number | null;
+  end: number | null;
+}
+
+export function formatClock(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/**
+ * Splits a transcript into consecutive windows of at most `budget` characters.
+ *
+ * Deterministic for a given transcript, which is what makes map progress
+ * resumable: a later request recomputes the same windows and skips the ones it
+ * already has summaries for. Boundaries fall between segments (or between
+ * sentences, for a transcript without timings), never inside one.
+ */
+export function buildWindows(
+  input: SummarizeInput,
+  budget = WINDOW_CHARS,
+): TranscriptWindow[] {
+  if (input.segments.length > 0) {
+    const windows: TranscriptWindow[] = [];
+    let current: typeof input.segments = [];
+    let size = 0;
+
+    const flush = () => {
+      if (current.length === 0) return;
+      const start = current[0].start;
+      const end = current[current.length - 1].end;
+      windows.push({
+        label: `${formatClock(start)}-${formatClock(end)}`,
+        body: renderSegments(current, false),
+        start,
+        end,
+      });
+      current = [];
+      size = 0;
+    };
+
+    for (const segment of input.segments) {
+      const line = `[${segment.start.toFixed(2)}-${segment.end.toFixed(2)}] ${segment.text}\n`;
+      if (size + line.length > budget && current.length > 0) flush();
+      current.push(segment);
+      size += line.length;
+    }
+    flush();
+    return windows;
+  }
+
+  // No timings: split on sentence ends, falling back to whitespace for a
+  // run-on transcript with no punctuation at all.
+  const sentences = input.transcript.match(/[^.!?]+[.!?]+["')\]]*\s*|[^.!?]+$/g) ?? [
+    input.transcript,
+  ];
+  const pieces: string[] = [];
+  for (const sentence of sentences) {
+    if (sentence.length <= budget) {
+      pieces.push(sentence);
+      continue;
+    }
+    for (let i = 0; i < sentence.length; i += budget) pieces.push(sentence.slice(i, i + budget));
+  }
+
+  const windows: TranscriptWindow[] = [];
+  let body = "";
+  for (const piece of pieces) {
+    if (body.length + piece.length > budget && body.trim()) {
+      windows.push({ label: `part ${windows.length + 1}`, body: body.trim(), start: null, end: null });
+      body = "";
+    }
+    body += piece;
+  }
+  if (body.trim()) {
+    windows.push({ label: `part ${windows.length + 1}`, body: body.trim(), start: null, end: null });
+  }
+  return windows;
+}
+
+export function buildSectionPrompt(input: {
+  title: string;
+  window: TranscriptWindow;
+  index: number;
+  total: number;
+}): string {
+  const timed = input.window.start !== null;
+  return [
+    `Meeting title: ${input.title}`,
+    "",
+    `This is section ${input.index + 1} of ${input.total} of a longer meeting` +
+      (timed ? `, covering ${input.window.label}.` : "."),
+    "Summarise only what happens in this section. The \"tldr\" describes this " +
+      "section in two or three sentences. Give one to three \"key_moments\" for " +
+      "this section" +
+      (timed ? ", using offsets that appear in the lines below." : "; with no timings available, return an empty array."),
+    "",
+    timed
+      ? "Timestamped transcript. The [start-end] values are offsets in seconds from the start of the whole meeting:"
+      : "Transcript:",
+    "",
+    input.window.body,
+    "",
+    "Return the JSON object now.",
+  ].join("\n");
+}
+
+export const REDUCE_SYSTEM_PROMPT = `You merge the section-by-section summaries of ONE long meeting into a single summary of the whole meeting. You always respond with a single JSON object and nothing else: no prose, no markdown fences, no commentary.
+
+The object must have exactly these keys:
+
+{
+  "tldr": string,
+  "topics": string[],
+  "decisions": string[],
+  "action_items": [{ "task": string, "owner": string | null, "due": string | null }],
+  "key_moments": [{ "timestamp": number, "label": string }]
+}
+
+Rules:
+- "tldr": two or three sentences about the whole meeting. Lead with the outcome, not the agenda.
+- "topics": three to six subject areas across the whole meeting, each a noun phrase of at most five words.
+- "decisions": every decision from the sections, merged where two sections state the same one. If a later section reverses an earlier decision, keep only the final one. Do not add decisions the sections do not contain.
+- "action_items": every distinct commitment from the sections. Sections overlap in what they repeat, so merge items that describe the same piece of work even when worded differently ("Add payload validation" and "Implement the payload validation fix" are one item), keeping the clearest wording. Keep "owner" and "due" exactly as given - if merged items disagree, keep the one stated later in the meeting. Never invent or infer them.
+- "key_moments": three to six of the most significant moments of the whole meeting, chosen ONLY from the key moments listed in the sections. Copy each "timestamp" exactly as given. If no section has key moments, return an empty array.
+- Only use information present in the section summaries.`;
+
+/** Renders section summaries as the user half of a reduce call. */
+export function buildReducePrompt(input: {
+  title: string;
+  sections: { label: string; summary: MeetingSummary }[];
+}): string {
+  return [
+    `Meeting title: ${input.title}`,
+    "",
+    `Summaries of the meeting's ${input.sections.length} consecutive sections, in order:`,
+    "",
+    ...input.sections.map(
+      (section, index) =>
+        `## Section ${index + 1} (${section.label})\n${JSON.stringify(section.summary)}\n`,
+    ),
+    "Return the merged JSON object now.",
+  ].join("\n");
+}
+
+/**
+ * Moves each key moment onto the nearest real segment start and removes
+ * duplicates. A merge step can round or misquote a timestamp; a moment that
+ * does not land on a transcript line cannot be clicked through to, so it is
+ * corrected rather than trusted.
+ */
+export function snapKeyMoments(
+  moments: KeyMoment[],
+  segments: { start: number }[],
+  limit = 6,
+): KeyMoment[] {
+  if (segments.length === 0) return [];
+  const starts = segments.map((s) => s.start).sort((a, b) => a - b);
+
+  const nearest = (t: number) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (starts[mid] < t) lo = mid + 1;
+      else hi = mid;
+    }
+    const candidates = [starts[lo], starts[lo - 1]].filter(
+      (v): v is number => typeof v === "number",
+    );
+    return candidates.reduce((best, v) => (Math.abs(v - t) < Math.abs(best - t) ? v : best));
+  };
+
+  const seen = new Set<number>();
+  const out: KeyMoment[] = [];
+  for (const moment of [...moments].sort((a, b) => a.timestamp - b.timestamp)) {
+    const timestamp = nearest(moment.timestamp);
+    if (seen.has(timestamp)) continue;
+    seen.add(timestamp);
+    out.push({ timestamp, label: moment.label });
+  }
+  return out.slice(0, limit);
 }
 
 /**
