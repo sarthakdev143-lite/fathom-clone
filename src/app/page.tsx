@@ -1,4 +1,5 @@
 import Link from "next/link";
+import MeetingSearch from "@/components/MeetingSearch";
 import SetupNotice from "@/components/SetupNotice";
 import { isDbConfigured } from "@/lib/config";
 import { listMeetings } from "@/lib/meetings";
@@ -88,7 +89,8 @@ export default async function Dashboard() {
           </p>
         </div>
       ) : (
-        <ul className="meeting-list">
+        <MeetingSearch>
+          <ul className="meeting-list">
           {meetings.map((meeting) => {
             const summary = parseSummary(meeting);
             return (
@@ -126,7 +128,8 @@ export default async function Dashboard() {
               </li>
             );
           })}
-        </ul>
+          </ul>
+        </MeetingSearch>
       )}
     </main>
   );

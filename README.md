@@ -6,7 +6,9 @@ Record a meeting, get a transcript and a summary — live at
 Records audio from the browser microphone, a tab playing a meeting, or an
 uploaded file, showing live captions and a running summary while recording.
 Transcribes with Groq Whisper (falling back to Gemini), then summarises into a
-TL;DR, topics, decisions, action items and timestamped key moments.
+TL;DR, topics, decisions, action items and timestamped key moments. The
+dashboard has a search box over titles, summary fields and transcript text,
+with hits that deep-link to the matching moment.
 
 ## Quickstart
 
@@ -30,7 +32,6 @@ Open http://localhost:3000. `npm run db:seed` adds four example meetings.
 ## Deliberately not built
 
 - Bot-based Zoom / Meet / Teams joining
-- Search
 - Live streaming of finished meetings
 - Gemini's WebSocket Live API, which would put the API key in the browser
 

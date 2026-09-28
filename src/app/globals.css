@@ -871,3 +871,83 @@ code {
   display: grid;
   gap: 1.25rem;
 }
+
+.search-input {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  margin-bottom: 1rem;
+}
+
+.search-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.search-count {
+  margin: 0 0 0.75rem;
+}
+
+.search-group {
+  margin-bottom: 0.85rem;
+}
+
+.search-group-title {
+  font-weight: 600;
+  font-size: 1rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.search-group-title:hover {
+  color: var(--accent);
+}
+
+.search-group-meta {
+  margin: 0.15rem 0 0;
+}
+
+.search-hits {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.search-hit {
+  display: block;
+  border-top: 1px solid var(--line);
+  padding-top: 0.5rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.search-hit:hover .search-hit-text {
+  color: var(--accent);
+}
+
+.search-hit-meta {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 0.15rem;
+}
+
+.search-hit-text {
+  display: block;
+  font-size: 0.9rem;
+}
+
+.search-hit-text mark {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}

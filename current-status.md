@@ -25,6 +25,7 @@ tree is clean and green.
 | 7 | Gemini fallback | Verified in production by deleting `GROQ_API_KEY` from Vercel and re-running: transcription and summary both completed via Gemini. |
 | 8 | Transcription accuracy | Measured at 99.1% WER 0.9% on a 128s two-speaker, 15-turn recording with injected noise. `whisper-large-v3-turbo` and full `whisper-large-v3` scored identically; Gemini scored 99.7%. |
 | 9 | Playback | Recorded WebM played with its Infinity duration fixed; click-to-seek, follow/pause, `?t=` and copy-link verified locally and in production. |
+| 10 | Search | FTS5 across ready meetings; LIKE fallback. Debounce, highlight, `?t=` links verified in a browser. |
 
 The pipeline was also run end to end **against the production deployment**:
 2.24 MB upload → 201, transcribe 3.9s, summarize 3.2s, detail page 200.
@@ -279,7 +280,32 @@ links carried the exact moment (`?t=9.64`); `?t=abc`, `-5` and `99999` all
 rendered safely; and the seeded, pre-playback and Gemini cases each showed their
 own note with the right controls enabled.
 
-## Known limits, deliberately not addressed
+## Search
+
+The dashboard has one box over titles, summary fields and transcript text,
+across ready meetings only. Results are grouped by meeting with up to three
+labelled hits each (Title, Topic, Action, Transcript …); transcript hits link
+to `/meetings/:id?t=SECONDS` at the matching segment start, everything else
+links plainly. Input is debounced 250 ms with in-flight requests aborted, an
+empty query restores the full list, and no matches render a named no-results
+card. The endpoint is read-only and makes no model calls.
+
+**FTS5 where available, LIKE otherwise.** `meeting_fts` (porter tokenizer,
+`meeting_id` unindexed) is created lazily with insert/delete/update triggers
+plus a backfill for pre-existing rows, so it never blocks startup on an
+SQLite without the FTS5 module — in that case, and if the MATCH query ever
+throws, the same tokens run as LIKE with a `LIMIT 20`. Both paths share one
+snippet builder, so the two modes render identically. Queries are capped at
+200 characters, ten tokens, twenty meetings; single-character tokens are
+dropped because they match everything. Snippets are plain text sliced on code
+points and snapped to word boundaries, and matches render in `<mark>` via a
+split, never `innerHTML`, so meeting content cannot inject markup.
+
+**Verified in a browser**: 8 fast keystrokes → 1 request; 3 groups, 7
+highlights; transcript hit → detail at `?t=`; gibberish → no-results naming
+the query; clearing restores the 5-card list; no page errors. The LIKE query
+was verified directly against SQL; the FTS path served every check above with
+`"mode":"fts"`.
 
 These are all outside the assigned steps 1–5 and were left alone on purpose.
 
@@ -429,5 +455,5 @@ because a stub that returns fake data reads as a working feature. The file
 documents the five hard parts if it is ever built for real. The UI exposes it as a
 disabled control labelled "does nothing".
 
-Also not built, as instructed until 1–5 were working: search, live streaming,
-anything beyond the assigned scope.
+Also not built, as instructed until 1–5 were working: live streaming,
+anything beyond the assigned scope. (Search has since been built; see above.)
