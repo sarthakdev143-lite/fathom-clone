@@ -22,8 +22,17 @@ export interface LiveSummary {
   action_items: ActionItem[];
 }
 
-/** Audio older than this is not re-read, to bound cost on long meetings. */
-const SUMMARY_REFRESH_SECONDS = 35;
+/**
+ * How much new audio has to arrive before the provisional summary is refreshed.
+ * It grows with the meeting: early on the summary changes a lot and the user
+ * is watching it form, later a one-minute or two-minute refresh reads the same
+ * and costs a fraction of the calls.
+ */
+export function summaryRefreshSeconds(audioSeconds: number): number {
+  if (audioSeconds < 10 * 60) return 35;
+  if (audioSeconds < 30 * 60) return 60;
+  return 120;
+}
 
 /** Client polls only for what changed since these counters. */
 export interface LiveDelta {
@@ -170,7 +179,44 @@ export async function isSummaryDue(
   if (Number(row.live_summary_seq ?? 0) === 0) return true;
 
   const lastAt = Number(row.live_summary_audio_seconds ?? 0);
-  return audioSeconds - lastAt >= SUMMARY_REFRESH_SECONDS;
+  return audioSeconds - lastAt >= summaryRefreshSeconds(audioSeconds);
+}
+
+/** What the rolling summary needs: the previous one and where it stopped. */
+export async function readLiveSummaryState(
+  id: string,
+): Promise<{ previous: LiveSummary | null; coveredSeconds: number }> {
+  const client = await db();
+  const result = await client.execute({
+    sql: `SELECT summary_json, live_summary_audio_seconds FROM meetings WHERE id = ?`,
+    args: [id],
+  });
+  const row = result.rows[0];
+  let previous: LiveSummary | null = null;
+  if (typeof row?.summary_json === "string") {
+    try {
+      const parsed = JSON.parse(row.summary_json) as LiveSummary;
+      if (parsed && typeof parsed.tldr === "string") previous = parsed;
+    } catch {
+      previous = null;
+    }
+  }
+  return { previous, coveredSeconds: Number(row?.live_summary_audio_seconds ?? 0) };
+}
+
+/**
+ * Keeps a live row from being swept as abandoned while the browser is still
+ * polling. Writes at most once a minute, so a 2-second poll is not a 2-second
+ * write.
+ */
+export async function touchLiveMeeting(id: string): Promise<void> {
+  const client = await db();
+  const now = new Date();
+  await client.execute({
+    sql: `UPDATE meetings SET updated_at = ?
+           WHERE id = ? AND status = 'live' AND updated_at < ?`,
+    args: [now.toISOString(), id, new Date(now.getTime() - 60_000).toISOString()],
+  });
 }
 
 export async function readSegments(id: string): Promise<TranscriptSegment[]> {

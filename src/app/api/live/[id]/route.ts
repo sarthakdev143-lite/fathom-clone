@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isDbConfigured } from "@/lib/config";
-import { getLiveDelta } from "@/lib/live";
+import { getLiveDelta, touchLiveMeeting } from "@/lib/live";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +36,12 @@ export async function GET(request: Request, context: Context) {
   const delta = await getLiveDelta({ id, sinceSegment, sinceSummary });
   if (!delta) {
     return NextResponse.json({ error: "No live meeting with that id." }, { status: 404 });
+  }
+
+  // A heartbeat, so the stale-session sweep never closes a meeting whose tab
+  // is still open (e.g. live captions failed to start, so no chunks arrive).
+  if (delta.status === "live") {
+    await touchLiveMeeting(id).catch(() => {});
   }
 
   return NextResponse.json(delta);

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { upload } from "@vercel/blob/client";
 import { useLiveSession } from "@/lib/use-live-session";
+import { describeProgress, runStage, type StageProgress } from "@/lib/pipeline-client";
 import {
   TabAudioError,
   mixAudioSources,
@@ -33,14 +34,7 @@ const MIME_CANDIDATES = [
 ];
 
 /** Matches `MAX_AUDIO_BYTES` in /api/meetings/blob. */
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
-
-/**
- * Groq's transcription endpoint rejects audio over 25 MB. Uploading still works
- * above that — the blob store does not care — but the transcription step will
- * fail, so the user is warned rather than stopped.
- */
-const TRANSCRIPTION_SIZE_LIMIT_BYTES = 25 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 
 type Phase =
   | "idle"
@@ -183,6 +177,7 @@ export default function Recorder() {
   } | null>(null);
   const [summary, setSummary] = useState<MeetingSummary | null>(null);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [stageProgress, setStageProgress] = useState<StageProgress | null>(null);
   const [liveEnabled, setLiveEnabled] = useState(true);
   const [captureMode, setCaptureMode] = useState<CaptureMode>("tab");
   const [capturedSources, setCapturedSources] = useState<"tab+mic" | "mic" | null>(null);
@@ -388,6 +383,9 @@ export default function Recorder() {
       setPhase("idle");
     };
 
+    // Without this, Stop could only end the recording indirectly (by stopping
+    // the tracks), and would briefly flash the idle screen before `onstop`.
+    recorderRef.current = recorder;
     recorder.start(1000);
     setPhase("recording");
 
@@ -594,51 +592,48 @@ export default function Recorder() {
     }
   }, [captured, live, title]);
 
+  /*
+   * Both stages are resumable on the server: long audio is transcribed chunk
+   * by chunk and long transcripts summarised window by window, across as many
+   * requests as it takes. `runStage` keeps calling until the stage is done.
+   */
   const transcribe = useCallback(async () => {
     if (!meetingId) return;
     setError(null);
+    setStageProgress(null);
     setPhase("transcribing");
 
     try {
-      const response = await fetch(`/api/meetings/${meetingId}/transcribe`, {
-        method: "POST",
+      const payload = await runStage(meetingId, "transcribe", {
+        onProgress: setStageProgress,
       });
-      const payload = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        setError(payload?.error ?? `Transcription failed (HTTP ${response.status}).`);
-        setPhase("uploaded");
-        return;
-      }
       setTranscript(payload?.transcript ?? null);
       setPhase("transcribed");
-    } catch {
-      setError("Could not reach the transcription service. Retry in a moment.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Transcription failed.");
       setPhase("uploaded");
+    } finally {
+      setStageProgress(null);
     }
   }, [meetingId]);
 
   const summarize = useCallback(async () => {
     if (!meetingId) return;
     setError(null);
+    setStageProgress(null);
     setPhase("summarizing");
 
     try {
-      const response = await fetch(`/api/meetings/${meetingId}/summarize`, {
-        method: "POST",
+      const payload = await runStage(meetingId, "summarize", {
+        onProgress: setStageProgress,
       });
-      const payload = await response.json().catch(() => null);
-
-      if (!response.ok) {
-        setError(payload?.error ?? `Summarization failed (HTTP ${response.status}).`);
-        setPhase("transcribed");
-        return;
-      }
       setSummary(payload?.summary ?? null);
       setPhase("ready-to-view");
-    } catch {
-      setError("Could not reach the summarizer. Retry in a moment.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Summarization failed.");
       setPhase("transcribed");
+    } finally {
+      setStageProgress(null);
     }
   }, [meetingId]);
 
@@ -774,6 +769,11 @@ export default function Recorder() {
               </div>
             </>
           )}
+          {describeProgress(stageProgress) && (
+            <p className="muted small" aria-live="polite" style={{ marginBottom: 0 }}>
+              {describeProgress(stageProgress)}
+            </p>
+          )}
         </div>
       ) : captured ? (
         <div className="panel">
@@ -810,13 +810,6 @@ export default function Recorder() {
               </dd>
             </div>
           </dl>
-
-          {captured.file.size > TRANSCRIPTION_SIZE_LIMIT_BYTES && (
-            <p className="warn" role="status">
-              This is {formatBytes(captured.file.size)}, over Groq&apos;s 25 MB
-              transcription limit. It will upload, but transcription will fail.
-            </p>
-          )}
 
           <div className="row">
             <button

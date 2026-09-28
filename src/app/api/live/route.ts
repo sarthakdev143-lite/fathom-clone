@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasBlobToken, hasGroqKey, isDbConfigured } from "@/lib/config";
 import { createLiveMeeting } from "@/lib/live";
+import { RATE_RULES, rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +29,9 @@ export async function POST(request: Request) {
       { status: 503 },
     );
   }
+
+  const limited = await rateLimit(request, RATE_RULES.liveStart);
+  if (limited) return limited;
 
   let title = "Live meeting";
   try {

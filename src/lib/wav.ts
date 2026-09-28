@@ -12,6 +12,33 @@
  * slice is a normal, independently valid WAV.
  */
 
+/**
+ * Whisper resamples everything to 16 kHz mono internally, so sending a 48 kHz
+ * slice uploads three times the bytes for no accuracy gain. Box-filter
+ * averaging over each output sample's span is a cheap low-pass that avoids the
+ * aliasing plain decimation would add; for speech at 16 kHz it is plenty.
+ */
+export const SPEECH_SAMPLE_RATE = 16_000;
+
+export function downsample(
+  samples: Float32Array,
+  fromRate: number,
+  toRate = SPEECH_SAMPLE_RATE,
+): Float32Array {
+  if (fromRate <= toRate || samples.length === 0) return samples;
+  const ratio = fromRate / toRate;
+  const outLength = Math.floor(samples.length / ratio);
+  const out = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(samples.length, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = start; j < end; j++) sum += samples[j];
+    out[i] = end > start ? sum / (end - start) : 0;
+  }
+  return out;
+}
+
 /** Interleaved Float32 samples -> 16-bit mono PCM WAV. */
 export function encodeWav(
   samples: Float32Array,

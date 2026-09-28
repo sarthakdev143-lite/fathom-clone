@@ -6,6 +6,7 @@ import { appendLiveSegments } from "@/lib/live";
 import { refreshLiveSummaryIfDue } from "@/lib/live-summary";
 import { transcribeAudio } from "@/lib/providers";
 import type { TranscriptSegment } from "@/lib/meetings";
+import { RATE_RULES, rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,12 +33,15 @@ export async function POST(request: Request, context: Context) {
       { status: 503 },
     );
   }
-  if (!hasGroqKey && !hasGeminiKey) {
+  if (!hasGroqKey && !hasGeminiKey()) {
     return NextResponse.json(
       { error: "No transcription provider is configured." },
       { status: 503 },
     );
   }
+
+  const limited = await rateLimit(request, RATE_RULES.liveChunk);
+  if (limited) return limited;
 
   const { id } = await context.params;
 

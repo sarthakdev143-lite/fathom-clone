@@ -1,6 +1,21 @@
 import { chatCompletion, GroqError } from "./groq";
-import { buildSummaryPrompt, SUMMARY_MODEL, type ActionItem } from "./summary";
-import { readSegments, isSummaryDue, setLiveSummary, type LiveSummary } from "./live";
+import { completeJson, type JsonCaller } from "./json-completion";
+import {
+  MAX_TRANSCRIPT_CHARS,
+  SUMMARY_MODEL,
+  buildSummaryPrompt,
+  formatClock,
+  renderSegments,
+  type ActionItem,
+} from "./summary";
+import {
+  isSummaryDue,
+  readLiveSummaryState,
+  readSegments,
+  setLiveSummary,
+  type LiveSummary,
+} from "./live";
+import type { TranscriptSegment } from "./meetings";
 
 /**
  * The provisional summary shown while a meeting is still recording.
@@ -31,7 +46,7 @@ Rules:
 - Return empty arrays rather than placeholder text.
 - Only use what is in the transcript. Do not speculate about what may be discussed next.`;
 
-function parseLiveSummary(raw: string): LiveSummary {
+export function parseLiveSummary(raw: string): LiveSummary {
   const text = raw.trim();
 
   let candidate: unknown;
@@ -100,25 +115,100 @@ export async function refreshLiveSummaryIfDue(input: {
     return { refreshed: false, reason: "no segments yet" };
   }
 
-  const { prompt, sampled } = buildSummaryPrompt({
-    title: "In-progress meeting",
-    transcript: segments.map((s) => s.text).join(" "),
+  const state = await readLiveSummaryState(input.id);
+  const prompt = buildLivePrompt({
     segments,
+    previous: state.previous,
+    coveredSeconds: state.coveredSeconds,
   });
 
-  const completion = await chatCompletion({
-    model: SUMMARY_MODEL,
-    system: LIVE_SYSTEM_PROMPT,
-    user: prompt,
-    temperature: 0.2,
-    maxTokens: 900,
-    jsonMode: true,
-  });
+  const { value } = await completeJson(
+    {
+      system: LIVE_SYSTEM_PROMPT,
+      user: prompt,
+      maxTokens: 900,
+      label: "live_summary",
+    },
+    parseLiveSummary,
+    groqOnlyCaller,
+  );
 
-  const summary = parseLiveSummary(completion.content);
-  await setLiveSummary(input.id, summary, sampled, input.audioSeconds);
+  await setLiveSummary(input.id, value, false, input.audioSeconds);
 
   return { refreshed: true };
+}
+
+/**
+ * Live summaries stay on Groq only. Falling back to Gemini here would spend
+ * the fallback's quota on a preview, and the chunk route relies on a Groq
+ * 429 surfacing so the client can slow its cadence.
+ */
+const groqOnlyCaller: JsonCaller = async (input) => {
+  const completion = await chatCompletion({
+    model: SUMMARY_MODEL,
+    system: input.system,
+    user: input.user,
+    temperature: 0.2,
+    maxTokens: input.maxTokens,
+    jsonMode: input.jsonMode,
+  });
+  return { content: completion.content, provider: "groq", fallbackReason: null };
+};
+
+/**
+ * Builds the live prompt.
+ *
+ * While the transcript fits, the whole thing is sent, as before. Past that
+ * point the summary becomes rolling: the previous provisional summary stands
+ * in for everything it already covered, and only the newest segments are sent
+ * verbatim. Nothing is sampled away, each call stays the same size however
+ * long the meeting runs, and that is what makes lifting the old 20-minute
+ * live ceiling affordable.
+ */
+export function buildLivePrompt(input: {
+  segments: TranscriptSegment[];
+  previous: LiveSummary | null;
+  coveredSeconds: number;
+}): string {
+  const full = renderSegments(input.segments, false);
+  if (full.length <= MAX_TRANSCRIPT_CHARS || !input.previous) {
+    return buildSummaryPrompt({
+      title: "In-progress meeting",
+      transcript: input.segments.map((s) => s.text).join(" "),
+      segments: input.segments,
+    }).prompt;
+  }
+
+  // Newest first until the budget is used, then back into order. Starts a
+  // little before the covered point so the model sees the seam in context.
+  const budget = MAX_TRANSCRIPT_CHARS - 4_000;
+  const recent: TranscriptSegment[] = [];
+  let size = 0;
+  for (let i = input.segments.length - 1; i >= 0; i--) {
+    const segment = input.segments[i];
+    const line = `[${segment.start.toFixed(2)}-${segment.end.toFixed(2)}] ${segment.text}\n`;
+    if (size + line.length > budget) break;
+    recent.unshift(segment);
+    size += line.length;
+    if (segment.end < input.coveredSeconds - 60) break;
+  }
+
+  const from = recent[0]?.start ?? input.coveredSeconds;
+
+  return [
+    "Meeting title: In-progress meeting",
+    "",
+    `Summary of the meeting up to about ${formatClock(input.coveredSeconds)}, written earlier:`,
+    JSON.stringify(input.previous),
+    "",
+    `Transcript from ${formatClock(from)} onwards. The [start-end] values are offsets in seconds:`,
+    "",
+    renderSegments(recent, false),
+    "",
+    "Update the summary so it covers the whole meeting so far: keep what is still " +
+      "true from the earlier summary, add what is new, and drop anything the newer " +
+      "transcript reverses. Return the JSON object now.",
+  ].join("\n");
 }
 
 export { GroqError };

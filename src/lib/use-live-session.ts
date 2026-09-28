@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { encodeWav } from "@/lib/wav";
+import { SPEECH_SAMPLE_RATE, downsample, encodeWav } from "@/lib/wav";
 
 /**
  * Live mode: captions and a running summary while the meeting is still being
@@ -19,8 +19,21 @@ import { encodeWav } from "@/lib/wav";
  * `invalid_media_file`.
  */
 
-/** Baseline audio per slice when everything is healthy. */
+/** Baseline audio per slice when everything is healthy, early in a meeting. */
 const CHUNK_SECONDS = 6;
+
+/**
+ * The healthy cadence lengthens as the meeting goes on. In the first minutes
+ * the user is watching captions appear and latency matters; an hour in, a
+ * 15-second caption delay is not noticed but halves the transcription calls.
+ * A 30-minute meeting drops from 300 slice calls to about 220, an hour from
+ * 600 to about 340.
+ */
+export function baseChunkMs(elapsedSeconds: number): number {
+  if (elapsedSeconds < 10 * 60) return CHUNK_SECONDS * 1000;
+  if (elapsedSeconds < 30 * 60) return 10_000;
+  return 15_000;
+}
 /** How often to ask the server for new captions and a new summary. */
 const POLL_MS = 2000;
 
@@ -49,9 +62,14 @@ const MAX_SLICE_SECONDS = 20;
 /**
  * Live updates stop after this much continuous recording. The recording itself
  * and the eventual authoritative transcript are unaffected - this only caps the
- * number of extra model calls a long meeting incurs.
+ * number of extra model calls a runaway session can incur.
+ *
+ * It used to be 20 minutes because summary calls grew with the transcript. The
+ * summary is now rolling (fixed-size calls) and the cadence stretches with
+ * time, so the ceiling is a safety net for a forgotten tab rather than a
+ * feature limit.
  */
-const LIVE_CEILING_SECONDS = 20 * 60;
+const LIVE_CEILING_SECONDS = 3 * 60 * 60;
 
 const WORKLET_SOURCE = `
 class PcmTap extends AudioWorkletProcessor {
@@ -149,13 +167,12 @@ export function useLiveSession() {
   );
 
   const resetCadence = useCallback(() => {
+    const base = baseChunkMs(recordedSecondsRef.current);
     // Only report an actual change, otherwise every healthy slice logs.
-    if (chunkIntervalRef.current === CHUNK_SECONDS * 1000) return;
+    if (chunkIntervalRef.current === base) return;
     const previous = chunkIntervalRef.current;
-    chunkIntervalRef.current = CHUNK_SECONDS * 1000;
-    console.info(
-      `[live] upstream recovered, chunk cadence ${previous}ms -> ${CHUNK_SECONDS * 1000}ms`,
-    );
+    chunkIntervalRef.current = base;
+    console.info(`[live] chunk cadence ${previous}ms -> ${base}ms`);
   }, []);
 
   const teardown = useCallback(() => {
@@ -233,7 +250,10 @@ export function useLiveSession() {
       );
     }
 
-    const blob = encodeWav(slice, sampleRateRef.current);
+    const blob = encodeWav(
+      downsample(slice, sampleRateRef.current, SPEECH_SAMPLE_RATE),
+      Math.min(sampleRateRef.current, SPEECH_SAMPLE_RATE),
+    );
     const form = new FormData();
     form.append("audio", blob, "chunk.wav");
     form.append("offset", String(startAt));

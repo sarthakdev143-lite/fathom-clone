@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isDbConfigured } from "@/lib/config";
 import { searchMeetings } from "@/lib/search";
+import { RATE_RULES, rateLimit } from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,9 @@ export async function GET(request: Request) {
       { status: 503 },
     );
   }
+
+  const limited = await rateLimit(request, RATE_RULES.search);
+  if (limited) return limited;
 
   const url = new URL(request.url);
   const query = (url.searchParams.get("q") ?? "").trim().slice(0, 200);
