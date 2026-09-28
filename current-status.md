@@ -24,6 +24,7 @@ tree is clean and green.
 | 6 | Live mode | Additive. Verified in production with real speech: captions at 6s intervals, provisional summary every ~35s of new audio, then the unchanged authoritative pipeline. |
 | 7 | Gemini fallback | Verified in production by deleting `GROQ_API_KEY` from Vercel and re-running: transcription and summary both completed via Gemini. |
 | 8 | Transcription accuracy | Measured at 99.1% WER 0.9% on a 128s two-speaker, 15-turn recording with injected noise. `whisper-large-v3-turbo` and full `whisper-large-v3` scored identically; Gemini scored 99.7%. |
+| 9 | Playback | Recorded WebM played with its Infinity duration fixed; click-to-seek, follow/pause, `?t=` and copy-link verified locally and in production. |
 
 The pipeline was also run end to end **against the production deployment**:
 2.24 MB upload → 201, transcribe 3.9s, summarize 3.2s, detail page 200.
@@ -228,6 +229,56 @@ reachable from browser JavaScript at all. Someone on a native app still has to
 use the microphone option, a second device, or a desktop application. This is a
 platform boundary, not an oversight.
 
+## Playback
+
+The detail page plays the stored recording, and every transcript line and key
+moment seeks it. The playing line is highlighted and kept in view inside the
+transcript box - never by scrolling the page, so a reader in the summary is not
+dragged down. Scrolling the transcript by hand (wheel, touch, keyboard, or the
+scrollbar) pauses that until "Follow playback" is pressed or a line is clicked.
+`?t=SECONDS` opens the page at that point, highlighted and on screen but not
+playing, and each key moment has "Copy link to this moment". The page is still a
+server component; a small client provider shares one audio element between the
+player, the key moments and the transcript without moving them in the layout.
+
+**MediaRecorder WebM files report their duration as Infinity in Chrome.** They
+have no Duration element and no Cues, so the native scrubber cannot be dragged.
+This was measured before building anything: a 12-second recording loaded with
+`duration = Infinity`. The player seeks far past the end once on load, which makes
+the browser scan to the last cluster and learn the real length, then restores the
+intended position. The highlight is frozen while that happens, or it would flash
+the final line. Blob storage answers Range requests with `206 Partial Content`,
+which is what lets remote seeking work at all.
+
+Degradation depends on how the meeting was made, so the note is chosen on the
+server:
+
+| Meeting | Player | Lines and moments |
+| --- | --- | --- |
+| Recorded or uploaded | shown | seek the audio |
+| Seeded demo | hidden, with a note | still jump to and highlight the transcript line |
+| Recorded before playback existed | hidden, with a note | still jump to the line |
+| Gemini transcript (no timings) | shown, with a note | not clickable; moment timestamps hidden |
+
+The last row hides the timestamps rather than just disabling them. Without
+segment offsets the summarizer had nothing to ground key moments in, so those
+times are guesses, and showing them as if they could be jumped to would be
+misleading.
+
+`audio_url` is validated against the Vercel Blob host pattern again at render time,
+since it ends up in an `<audio src>`. A deleted blob shows "The recording could not
+be loaded" instead of a silent broken player.
+
+**Verified in a browser, locally and in production**, against a recording made
+through the UI so the WebM fix ran on the real format: duration Infinity fixed to
+50.16s; clicking a line at 0:26 landed at 26.79 and started playback; the
+highlight advanced during playback; wheel-scrolling paused auto-scroll while the
+highlight kept moving and the scroll position held still; "Follow playback"
+brought the line back; `?t=33.98` opened at exactly 33.98 without playing; copied
+links carried the exact moment (`?t=9.64`); `?t=abc`, `-5` and `99999` all
+rendered safely; and the seeded, pre-playback and Gemini cases each showed their
+own note with the right controls enabled.
+
 ## Known limits, deliberately not addressed
 
 These are all outside the assigned steps 1–5 and were left alone on purpose.
@@ -306,8 +357,10 @@ uploads, not for recordings - recordings default to on, because a user who
 records a meeting usually wants the live view. The toggle is in the capture
 panel.
 
-**8. No audio playback.** The audio is stored in blob storage, but there is no
-endpoint to stream it back. Out of scope for the five steps.
+**8. No audio playback for meetings recorded before blob storage.** Those rows kept
+their audio in the `audio_blob` column, and playback reads `audio_url` only, so
+the one such meeting ("Q3 checkout planning sync") shows a note instead of a
+player. Serving the legacy column would need a small streaming endpoint.
 
 **9. `npm run db:seed` calls the live Groq API** four times. It also deletes
 existing `source = 'seed'` rows first, which makes it idempotent but not
